@@ -1,0 +1,23 @@
+# Docker ignore file for optimized builds
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist/
+build/
+.git/
+.gitignore
+.env
+.venv
+venv/
+.DS_Store
+*.pt
+*.pth
+models/
+datasets/
+*.log
+.ipynb_checkpoints

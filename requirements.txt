@@ -1,0 +1,29 @@
+# Modern PyTorch Stack - Compatible with AWS, Google Cloud, and TAMU HPRC
+# Optimized for CUDA 11.8 (widely available on cloud platforms)
+
+# Core deep learning frameworks
+# PyTorch 2.1.2 - Stable, well-tested version with good CUDA support
+# Compatible with CUDA 11.8 and 12.1 (most cloud platforms)
+torch==2.1.2
+torchvision==0.16.2
+
+# Scientific computing
+# NumPy 1.24.3 - Stable, compatible with PyTorch 2.1+
+# Avoids newer versions that might have compatibility issues
+numpy==1.24.3
+
+# Utilities
+# easydict - For argument dictionaries (used in checkpoint loading)
+# Replaced attrdict with easydict for Python 3.10+ compatibility
+easydict==1.11
+
+# Image processing (required by torchvision)
+Pillow==10.0.0
+
+# Python 2/3 compatibility (if needed for legacy code)
+six==1.16.0
+
+# Note: Install PyTorch with CUDA from the official PyTorch wheel index:
+# pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu118
+# Or for CUDA 12.1:
+# pip install torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu121
