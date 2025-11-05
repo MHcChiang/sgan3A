@@ -10,15 +10,22 @@ This is the upgraded version of Social GAN with modern PyTorch 2.1.2, fully devi
 # Install dependencies
 pip install -r requirements.txt
 
-# Run evaluation
-python scripts/evaluate_model.py --model_path ../models/sgan-models/eth_8_model.pt
+# Run evaluation script to test
+python scripts/evaluate_model.py --model_path models/sgan-models
 ```
 
 ### Docker Build
 
 ```bash
-docker build -t sgan-pytorch2 .
-docker run -it sgan-pytorch2
+# Build image
+docker build -t sgan_new .
+docker build --platform linux/amd64 -t sgan-env . # for mac
+
+# run container
+docker run -it --rm -v "$(pwd)":/app sgan-env
+
+# to exit:
+exit
 ```
 
 ### Cloud Deployment
