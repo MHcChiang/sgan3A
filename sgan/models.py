@@ -76,7 +76,7 @@ class Encoder(nn.Module):
         self.encoder = nn.LSTM(
             embedding_dim, h_dim, num_layers, dropout=dropout
         )
-
+        # first embed the location of each person using a MLP to get a fixed length vector
         self.spatial_embedding = nn.Linear(2, embedding_dim)
 
     def init_hidden(self, batch):
@@ -216,7 +216,7 @@ class PoolHiddenNet(nn.Module):
     ):
         super(PoolHiddenNet, self).__init__()
 
-        self.mlp_dim = 1024
+        self.mlp_dim = mlp_dim
         self.h_dim = h_dim
         self.bottleneck_dim = bottleneck_dim
         self.embedding_dim = embedding_dim
@@ -255,6 +255,7 @@ class PoolHiddenNet(nn.Module):
         """
         pool_h = []
         for _, (start, end) in enumerate(seq_start_end):
+            print(f"loop: {_}")
             start = start.item()
             end = end.item()
             num_ped = end - start

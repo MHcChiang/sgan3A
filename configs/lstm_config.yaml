@@ -1,0 +1,70 @@
+# Example YAML configuration file for training LSTM-based SGAN
+# Usage: python scripts/train.py --config configs/lstm_config.yaml
+
+# Model Architecture
+model_type: lstm
+
+# Dataset options
+dataset_name: zara1
+delim: tab
+loader_num_workers: 4
+obs_len: 8
+pred_len: 12
+skip: 1
+
+# Optimization
+batch_size: 64
+num_iterations: 10000
+num_epochs: 200
+
+# Model Options
+embedding_dim: 64
+num_layers: 1
+dropout: 0.0
+batch_norm: 0
+mlp_dim: 1024
+
+# Generator Options
+encoder_h_dim_g: 64
+decoder_h_dim_g: 128
+noise_dim: [16]
+noise_type: gaussian
+noise_mix_type: ped
+clipping_threshold_g: 0
+g_learning_rate: 0.0005
+g_steps: 1
+
+# Pooling Options
+pooling_type: pool_net
+pool_every_timestep: 1
+bottleneck_dim: 1024
+
+# Social Pooling Options
+neighborhood_size: 2.0
+grid_size: 8
+
+# Discriminator Options
+d_type: local
+encoder_h_dim_d: 64
+d_learning_rate: 0.0005
+d_steps: 2
+clipping_threshold_d: 0
+
+# Loss Options
+l2_loss_weight: 1.0
+best_k: 1
+
+# Output
+output_dir: ./checkpoints
+print_every: 5
+checkpoint_every: 100
+checkpoint_name: checkpoint_lstm
+checkpoint_start_from: null
+restore_from_checkpoint: 1
+num_samples_check: 5000
+
+# Misc
+use_gpu: 1
+timing: 0
+gpu_num: "0"
+

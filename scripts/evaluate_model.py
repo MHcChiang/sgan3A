@@ -1,6 +1,12 @@
 import argparse
 import os
+import sys
 import torch
+
+# Add project root to Python path to enable imports
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from easydict import EasyDict as AttrDict
 

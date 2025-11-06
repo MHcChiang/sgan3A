@@ -7,15 +7,22 @@ import time
 
 from collections import defaultdict
 
+# Add project root to Python path to enable imports
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import yaml
 
 from sgan.data.loader import data_loader
 from sgan.losses import gan_g_loss, gan_d_loss, l2_loss
 from sgan.losses import displacement_error, final_displacement_error
 
 from sgan.models import TrajectoryGenerator, TrajectoryDiscriminator
+from sgan.sganT import TrajectoryGenerator_Transformer, TrajectoryDiscriminator_Transformer
 from sgan.utils import int_tuple, bool_flag, get_total_norm
 from sgan.utils import relative_to_abs, get_dset_path
 
@@ -87,6 +94,15 @@ parser.add_argument('--checkpoint_start_from', default=None)
 parser.add_argument('--restore_from_checkpoint', default=1, type=int)
 parser.add_argument('--num_samples_check', default=5000, type=int)
 
+# Model Architecture
+parser.add_argument('--model_type', default='lstm', type=str,
+                    choices=['lstm', 'transformer'],
+                    help='Model architecture: lstm or transformer')
+
+# Configuration file
+parser.add_argument('--config', type=str, default=None,
+                    help='Path to YAML configuration file. If provided, arguments from YAML will override defaults.')
+
 # Misc
 parser.add_argument('--use_gpu', default=1, type=int)
 parser.add_argument('--timing', default=0, type=int)
@@ -94,6 +110,19 @@ parser.add_argument('--gpu_num', default="0", type=str)
 
 
 def init_weights(m):
+    """
+    Initialize weights for neural network layers.
+    
+    This function is applied to all modules in the model using .apply().
+    It initializes Linear layers with Kaiming normal initialization, which
+    is particularly good for ReLU activations and helps with training stability.
+    
+    Args:
+        m: A PyTorch module (layer) from the model
+        
+    Usage:
+        model.apply(init_weights)  # Applies to all modules recursively
+    """
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
         nn.init.kaiming_normal_(m.weight)
@@ -139,41 +168,75 @@ def main(args):
         'There are {} iterations per epoch'.format(iterations_per_epoch)
     )
 
-    generator = TrajectoryGenerator(
-        obs_len=args.obs_len,
-        pred_len=args.pred_len,
-        embedding_dim=args.embedding_dim,
-        encoder_h_dim=args.encoder_h_dim_g,
-        decoder_h_dim=args.decoder_h_dim_g,
-        mlp_dim=args.mlp_dim,
-        num_layers=args.num_layers,
-        noise_dim=args.noise_dim,
-        noise_type=args.noise_type,
-        noise_mix_type=args.noise_mix_type,
-        pooling_type=args.pooling_type,
-        pool_every_timestep=args.pool_every_timestep,
-        dropout=args.dropout,
-        bottleneck_dim=args.bottleneck_dim,
-        neighborhood_size=args.neighborhood_size,
-        grid_size=args.grid_size,
-        batch_norm=args.batch_norm)
+    # Choose model architecture
+    logger.info(f'Using model architecture: {args.model_type}')
+    
+    if args.model_type == 'transformer':
+        generator = TrajectoryGenerator_Transformer(
+            obs_len=args.obs_len,
+            pred_len=args.pred_len,
+            embedding_dim=args.embedding_dim,
+            encoder_h_dim=args.encoder_h_dim_g,
+            decoder_h_dim=args.decoder_h_dim_g,
+            mlp_dim=args.mlp_dim,
+            num_layers=args.num_layers,
+            noise_dim=args.noise_dim,
+            noise_type=args.noise_type,
+            noise_mix_type=args.noise_mix_type,
+            pooling_type=args.pooling_type,
+            pool_every_timestep=args.pool_every_timestep,
+            dropout=args.dropout,
+            bottleneck_dim=args.bottleneck_dim,
+            neighborhood_size=args.neighborhood_size,
+            grid_size=args.grid_size,
+            batch_norm=args.batch_norm)
+        
+        discriminator = TrajectoryDiscriminator_Transformer(
+            obs_len=args.obs_len,
+            pred_len=args.pred_len,
+            embedding_dim=args.embedding_dim,
+            h_dim=args.encoder_h_dim_d,
+            mlp_dim=args.mlp_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            batch_norm=args.batch_norm,
+            d_type=args.d_type)
+    else:  # LSTM (default)
+        generator = TrajectoryGenerator(
+            obs_len=args.obs_len,
+            pred_len=args.pred_len,
+            embedding_dim=args.embedding_dim,
+            encoder_h_dim=args.encoder_h_dim_g,
+            decoder_h_dim=args.decoder_h_dim_g,
+            mlp_dim=args.mlp_dim,
+            num_layers=args.num_layers,
+            noise_dim=args.noise_dim,
+            noise_type=args.noise_type,
+            noise_mix_type=args.noise_mix_type,
+            pooling_type=args.pooling_type,
+            pool_every_timestep=args.pool_every_timestep,
+            dropout=args.dropout,
+            bottleneck_dim=args.bottleneck_dim,
+            neighborhood_size=args.neighborhood_size,
+            grid_size=args.grid_size,
+            batch_norm=args.batch_norm)
+        
+        discriminator = TrajectoryDiscriminator(
+            obs_len=args.obs_len,
+            pred_len=args.pred_len,
+            embedding_dim=args.embedding_dim,
+            h_dim=args.encoder_h_dim_d,
+            mlp_dim=args.mlp_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            batch_norm=args.batch_norm,
+            d_type=args.d_type)
 
     generator.apply(init_weights)
     generator = generator.to(device)
     generator.train()
     logger.info('Here is the generator:')
     logger.info(generator)
-
-    discriminator = TrajectoryDiscriminator(
-        obs_len=args.obs_len,
-        pred_len=args.pred_len,
-        embedding_dim=args.embedding_dim,
-        h_dim=args.encoder_h_dim_d,
-        mlp_dim=args.mlp_dim,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        batch_norm=args.batch_norm,
-        d_type=args.d_type)
 
     discriminator.apply(init_weights)
     discriminator = discriminator.to(device)
@@ -425,19 +488,21 @@ def generator_step(
 
     loss_mask = loss_mask[:, args.obs_len:]
 
+    # Generate k predictions (variety loss)
     for _ in range(args.best_k):
         generator_out = generator(obs_traj, obs_traj_rel, seq_start_end)
 
         pred_traj_fake_rel = generator_out
         pred_traj_fake = relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
-
+        # Compute L2 loss for each prediction and store in g_l2_loss_rel
         if args.l2_loss_weight > 0:
             g_l2_loss_rel.append(args.l2_loss_weight * l2_loss(
                 pred_traj_fake_rel,
                 pred_traj_gt_rel,
                 loss_mask,
                 mode='raw'))
-
+                
+    # Take minimum over k predictions (variety loss)
     g_l2_loss_sum_rel = torch.zeros(1, device=device)
     if args.l2_loss_weight > 0:
         g_l2_loss_rel = torch.stack(g_l2_loss_rel, dim=1)
@@ -594,6 +659,54 @@ def cal_fde(
     return fde, fde_l, fde_nl
 
 
+def load_config_from_yaml(config_path):
+    """
+    Load configuration from YAML file.
+    
+    Args:
+        config_path: Path to YAML configuration file
+        
+    Returns:
+        Dictionary of configuration values
+    """
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config if config else {}
+
+
 if __name__ == '__main__':
-    args = parser.parse_args()
+    # First, parse only the config argument
+    temp_parser = argparse.ArgumentParser(add_help=False)
+    temp_parser.add_argument('--config', type=str, default=None)
+    temp_args, remaining_args = temp_parser.parse_known_args()
+    
+    # Load YAML config if provided
+    yaml_config = {}
+    if temp_args.config is not None:
+        if not os.path.exists(temp_args.config):
+            logger.error(f'Config file not found: {temp_args.config}')
+            sys.exit(1)
+        logger.info(f'Loading configuration from: {temp_args.config}')
+        yaml_config = load_config_from_yaml(temp_args.config)
+    
+    # Convert YAML keys to argparse format (replace '-' with '_', remove '--' prefix)
+    yaml_args = []
+    for key, value in yaml_config.items():
+        key = key.lstrip('--').replace('-', '_')
+        if value is not None:
+            # Convert value to string for argparse
+            if isinstance(value, bool):
+                yaml_args.extend([f'--{key}', '1' if value else '0'])
+            elif isinstance(value, list):
+                # Handle lists (e.g., noise_dim)
+                yaml_args.extend([f'--{key}'] + [str(v) for v in value])
+            else:
+                yaml_args.extend([f'--{key}', str(value)])
+    
+    # Combine YAML args with command-line args (command-line overrides YAML)
+    all_args = yaml_args + remaining_args
+    
+    # Parse all arguments
+    args = parser.parse_args(all_args)
+    
     main(args)

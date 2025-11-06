@@ -1,4 +1,4 @@
-from models import *
+from sgan.models import *
 import torch
 import torch.nn as nn
 import math
@@ -75,7 +75,7 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-class PoolHiddenNetT(nn.Module):
+class PoolHiddenNet_Transformer(nn.Module):
     """
     Pooling module (Transformer-friendly).
     Functionally equivalent to `PoolHiddenNet` in `models.py`, but:
@@ -86,7 +86,7 @@ class PoolHiddenNetT(nn.Module):
         self, embedding_dim=64, h_dim=64, mlp_dim=1024, bottleneck_dim=1024,
         activation='relu', batch_norm=True, dropout=0.0
     ):
-        super(PoolHiddenNetT, self).__init__()
+        super(PoolHiddenNet_Transformer, self).__init__()
 
         self.mlp_dim = 1024
         self.h_dim = h_dim
@@ -113,16 +113,22 @@ class PoolHiddenNetT(nn.Module):
     def forward(self, h_states, seq_start_end, end_pos):
         """
         Inputs:
-        - h_states: Tensor of shape (num_layers, batch, h_dim)
+        - h_states: Tensor of shape (batch, h_dim) or (num_layers, batch, h_dim)
+                   - If (num_layers, batch, h_dim), will be flattened to (batch, h_dim)
         - seq_start_end: list/tuple/tensor of (start_idx, end_idx) boundaries
         - end_pos: Tensor of shape (batch, 2)
         Output:
         - pool_h: Tensor of shape (batch, bottleneck_dim)
         """
+        # Handle both (batch, h_dim) and (num_layers, batch, h_dim) formats
+        if h_states.dim() == 3:
+            # Flatten from (num_layers, batch, h_dim) to (batch, h_dim)
+            h_states = h_states.contiguous().view(-1, self.h_dim)
+        
         pool_h = []
         for _, (start, end) in enumerate(seq_start_end):
             num_ped = end - start
-            curr_hidden = h_states.contiguous().view(-1, self.h_dim)[start:end]
+            curr_hidden = h_states[start:end]  # (batch, h_dim) -> (num_ped, h_dim)
             curr_end_pos = end_pos[start:end]
 
             # Repeat -> H1, H2, H1, H2
@@ -201,59 +207,24 @@ class Encoder_Transformer(nn.Module):
             num_layers=num_layers      # Stack multiple layers
         )
         
-        # Project from embedding_dim to h_dim to match LSTM output dimensions
-        # LSTM outputs h_dim directly, but transformer outputs embedding_dim
+        # Project from embedding_dim to h_dim
+        # Transformer outputs embedding_dim, we project to h_dim for consistency
         self.output_proj = nn.Linear(embedding_dim, h_dim)
-    
-    def init_hidden(self, batch):
-        """
-        Initialize hidden state tensors.
-        
-        IMPORTANT: This method is kept ONLY for compatibility with existing code.
-        Transformers do NOT use hidden state initialization like LSTM does.
-        
-        In LSTM Encoder:
-        - init_hidden() is REQUIRED to create initial hidden (h) and cell (c) states
-        - These states are passed to LSTM.forward() and updated at each timestep
-        - LSTM maintains memory through these states as it processes the sequence
-        
-        In Transformer Encoder:
-        - No hidden state initialization needed
-        - All timesteps are processed in parallel
-        - This method is NOT called in forward() and returns unused zeros
-        
-        Args:
-            batch: Batch size (number of trajectories in the batch)
-                  - Used to determine the size of the hidden state tensors
-                  
-        Returns:
-            Tuple (h, c) where:
-            - h: Hidden state tensor of shape (num_layers, batch, h_dim)
-                - Initialized to zeros (never used in Transformer)
-            - c: Cell state tensor of shape (num_layers, batch, h_dim)
-                - Initialized to zeros (never used in Transformer)
-            - Device matches model parameters (CPU or GPU)
-        """
-        try:
-            device = next(self.parameters()).device
-        except:
-            device = torch.device('cpu')
-        
-        # Create zero-initialized tensors matching LSTM's expected format
-        # Note: These are never used in Transformer, only kept for interface compatibility
-        h = torch.zeros(self.num_layers, batch, self.h_dim, device=device)
-        c = torch.zeros(self.num_layers, batch, self.h_dim, device=device)
-        return (h, c)
 
     def forward(self, obs_traj):
         """
-            -obs_traj: Tensor of shape (obs_len, batch, 2)
+        Encode observed trajectory using Transformer architecture.
+        
+        Args:
+            obs_traj: Tensor of shape (obs_len, batch, 2)
                      - obs_len: Number of observed timesteps (e.g., 8)
                      - batch: Batch size (number of pedestrian trajectories)
                      - 2: (x, y) coordinates at each timestep
                      
         Returns:
-            -final_h: Tensor of shape (num_layers, batch, h_dim)
+            encoder_output: Tensor of shape (batch, h_dim)
+                          - Encoded representation of the observed trajectory
+                          - One vector per pedestrian in the batch
         """
         # Encode observed trajectory
         batch = obs_traj.size(1)
@@ -263,7 +234,6 @@ class Encoder_Transformer(nn.Module):
         # Input: (obs_len, batch, 2) -> flatten to (obs_len*batch, 2)
         # Embed: (obs_len*batch, 2) -> (obs_len*batch, embedding_dim)
         # Reshape: (obs_len*batch, embedding_dim) -> (obs_len, batch, embedding_dim)
-        # Note: We use obs_len explicitly instead of -1 for clarity (both work the same)
         obs_traj_embedding = self.spatial_embedding(obs_traj.contiguous().view(-1, 2))
         obs_traj_embedding = obs_traj_embedding.view(
             obs_len, batch, self.embedding_dim
@@ -278,13 +248,10 @@ class Encoder_Transformer(nn.Module):
         # Step 4: Extract last timestep
         last_output = transformer_output[-1]  # Take last timestep: (batch, embedding_dim)
         
-        # Step 5: Project to h_dim to match LSTM output format
-        last_output = self.output_proj(last_output)  # (batch, h_dim)
+        # Step 5: Project to h_dim
+        encoder_output = self.output_proj(last_output)  # (batch, h_dim)
         
-        # Step 6: Reshape to match LSTM output format for compatibility
-        final_h = last_output.unsqueeze(0).repeat(self.num_layers, 1, 1)
-        
-        return final_h
+        return encoder_output
 
 
 class Decoder_Transformer(nn.Module):
@@ -363,7 +330,7 @@ class Decoder_Transformer(nn.Module):
         # Pooling (same as original decoder)
         if pool_every_timestep:
             if pooling_type == 'pool_net':
-                self.pool_net = PoolHiddenNetT(
+                self.pool_net = PoolHiddenNet_Transformer(
                     embedding_dim=self.embedding_dim,
                     h_dim=self.h_dim,
                     mlp_dim=mlp_dim,
@@ -390,17 +357,19 @@ class Decoder_Transformer(nn.Module):
                 dropout=dropout
             )
     
-    def forward(self, last_pos, last_pos_rel, state_tuple, seq_start_end):
+    def forward(self, last_pos, last_pos_rel, encoder_memory, seq_start_end):
         """
-            -last_pos: Tensor of shape (batch, 2)          
-            -last_pos_rel: Tensor of shape (batch, 2)    
-            -state_tuple: (hh, ch) each tensor of shape (num_layers, batch, h_dim)
-                       - hh: Hidden state tensor of shape (num_layers, batch, h_dim)
-                         - Contains encoder's final output (used as memory)
-                       - ch: Cell state tensor of shape (num_layers, batch, h_dim)
-                         - Not used in Transformer
-                         - In LSTM: Cell state maintains long-term memory
-            -seq_start_end: A list of tuples which delimit sequences within batch [(start_idx, end_idx), ...]
+        Decode future trajectory using Transformer architecture.
+        
+        Args:
+            last_pos: Tensor of shape (batch, 2)
+                     - Last absolute position for each pedestrian
+            last_pos_rel: Tensor of shape (batch, 2)
+                        - Last relative position for each pedestrian
+            encoder_memory: Tensor of shape (batch, h_dim)
+                          - Encoder's output representation for each pedestrian
+                          - Used as memory in the transformer decoder
+            seq_start_end: A list of tuples which delimit sequences within batch [(start_idx, end_idx), ...]
                           - Delimits different sequences/pedestrians within the batch
                           - Used for pooling to model social interactions
                           - Example: [(0, 3), (3, 7), (7, 10)] means:
@@ -416,19 +385,11 @@ class Decoder_Transformer(nn.Module):
                                - batch: Same as input batch size
                                - 2: Relative (dx, dy) positions at each timestep
                                - Example for seq_len=12: shape is (12, batch, 2)
-                               
-            final_decoder_h: Tensor of shape (num_layers, batch, h_dim) 
-                           - Final decoder hidden state (for compatibility to LSTM)
         """
         batch = last_pos.size(0)
         
-        # Extract encoder memory from state_tuple (first element)
-        # state_tuple[0] shape: (num_layers, batch, h_dim)
-        # We'll use the last layer as memory, convert to embedding_dim
-        encoder_memory = state_tuple[0][-1]  # (batch, h_dim)
-        
         # Project encoder memory to embedding_dim for transformer decoder
-        # Transform to (seq_len, batch, embedding_dim) format
+        # encoder_memory: (batch, h_dim) -> encoder_memory_embed: (batch, embedding_dim)
         encoder_memory_embed = self.hidden_to_embedding(encoder_memory)  # (batch, embedding_dim)
         encoder_memory_embed = encoder_memory_embed.unsqueeze(0)  # (1, batch, embedding_dim)
         
@@ -468,9 +429,8 @@ class Decoder_Transformer(nn.Module):
             
             # Pooling (if enabled)
             if self.pool_every_timestep:
-                # Need to reshape decoder_h for pooling
-                decoder_h_pool = decoder_h.unsqueeze(0)  # (1, batch, h_dim)
-                pool_h = self.pool_net(decoder_h_pool, seq_start_end, curr_pos)
+                # Pooling expects (batch, h_dim) - decoder_h is already in this format
+                pool_h = self.pool_net(decoder_h, seq_start_end, curr_pos)
                 decoder_h = torch.cat([decoder_h, pool_h], dim=1)
                 decoder_h = self.mlp(decoder_h)
                 # Update embedding from pooled hidden state
@@ -484,12 +444,277 @@ class Decoder_Transformer(nn.Module):
         
         pred_traj_fake_rel = torch.stack(pred_traj_fake_rel, dim=0)
         
-        # Final decoder hidden state for compatibility
-        # Use the last decoder_h (which may have been pooled)
-        final_decoder_h = decoder_h.unsqueeze(0).repeat(self.num_layers, 1, 1)  # (num_layers, batch, h_dim)
-        
-        return pred_traj_fake_rel, final_decoder_h
+        return pred_traj_fake_rel
 
+
+class TrajectoryGenerator_Transformer(nn.Module):
+    def __init__(
+        self, obs_len, pred_len, embedding_dim=64, encoder_h_dim=64,
+        decoder_h_dim=128, mlp_dim=1024, num_layers=1, noise_dim=(0, ),
+        noise_type='gaussian', noise_mix_type='ped', pooling_type=None,
+        pool_every_timestep=True, dropout=0.0, bottleneck_dim=1024,
+        activation='relu', batch_norm=True, neighborhood_size=2.0, grid_size=8
+    ):
+        super(TrajectoryGenerator_Transformer, self).__init__()
+
+        if pooling_type and pooling_type.lower() == 'none':
+            pooling_type = None
+
+        self.obs_len = obs_len
+        self.pred_len = pred_len
+        self.mlp_dim = mlp_dim
+        self.encoder_h_dim = encoder_h_dim
+        self.decoder_h_dim = decoder_h_dim
+        self.embedding_dim = embedding_dim
+        self.noise_dim = noise_dim
+        self.num_layers = num_layers
+        self.noise_type = noise_type
+        self.noise_mix_type = noise_mix_type
+        self.pooling_type = pooling_type
+        self.noise_first_dim = 0
+        self.pool_every_timestep = pool_every_timestep
+        self.bottleneck_dim = 1024
+
+        self.encoder = Encoder_Transformer(
+            embedding_dim=embedding_dim,
+            h_dim=encoder_h_dim,
+            mlp_dim=mlp_dim,
+            num_layers=num_layers,
+            dropout=dropout
+        )
+
+        self.decoder = Decoder_Transformer(
+            pred_len,
+            embedding_dim=embedding_dim,
+            h_dim=decoder_h_dim,
+            mlp_dim=mlp_dim,
+            num_layers=num_layers,
+            pool_every_timestep=pool_every_timestep,
+            dropout=dropout,
+            bottleneck_dim=bottleneck_dim,
+            activation=activation,
+            batch_norm=batch_norm,
+            pooling_type=pooling_type,
+            grid_size=grid_size,
+            neighborhood_size=neighborhood_size
+        )
+
+        if pooling_type == 'pool_net':
+            self.pool_net = PoolHiddenNet_Transformer(
+                embedding_dim=self.embedding_dim,
+                h_dim=encoder_h_dim,
+                mlp_dim=mlp_dim,
+                bottleneck_dim=bottleneck_dim,
+                activation=activation,
+                batch_norm=batch_norm,
+                dropout=dropout
+            )
+        elif pooling_type == 'spool':
+            self.pool_net = SocialPooling(
+                h_dim=encoder_h_dim,
+                activation=activation,
+                batch_norm=batch_norm,
+                dropout=dropout,
+                neighborhood_size=neighborhood_size,
+                grid_size=grid_size
+            )
+
+        if self.noise_dim[0] == 0:
+            self.noise_dim = None
+        else:
+            self.noise_first_dim = noise_dim[0]
+
+        # Decoder Hidden
+        if pooling_type:
+            input_dim = encoder_h_dim + bottleneck_dim
+        else:
+            input_dim = encoder_h_dim
+
+        if self.mlp_decoder_needed():
+            mlp_decoder_context_dims = [
+                input_dim, mlp_dim, decoder_h_dim - self.noise_first_dim
+            ]
+
+            self.mlp_decoder_context = make_mlp(
+                mlp_decoder_context_dims,
+                activation=activation,
+                batch_norm=batch_norm,
+                dropout=dropout
+            )
+
+    def add_noise(self, _input, seq_start_end, user_noise=None):
+        """
+        Inputs:
+        - _input: Tensor of shape (_, decoder_h_dim - noise_first_dim)
+        - seq_start_end: A list of tuples which delimit sequences within batch.
+        - user_noise: Generally used for inference when you want to see
+        relation between different types of noise and outputs.
+        Outputs:
+        - decoder_h: Tensor of shape (_, decoder_h_dim)
+        """
+        if not self.noise_dim:
+            return _input
+
+        # Convert noise_dim to tuple if it's a list (for Python 3.10+ compatibility)
+        noise_dim_tuple = tuple(self.noise_dim) if isinstance(self.noise_dim, list) else self.noise_dim
+
+        if self.noise_mix_type == 'global':
+            noise_shape = (seq_start_end.size(0), ) + noise_dim_tuple
+        else:
+            noise_shape = (_input.size(0), ) + noise_dim_tuple
+
+        if user_noise is not None:
+            z_decoder = user_noise
+        else:
+            # Get device from input tensor (device-agnostic)
+            device = _input.device
+            z_decoder = get_noise(noise_shape, self.noise_type, device=device)
+
+        if self.noise_mix_type == 'global':
+            _list = []
+            for idx, (start, end) in enumerate(seq_start_end):
+                start = start.item()
+                end = end.item()
+                _vec = z_decoder[idx].view(1, -1)
+                _to_cat = _vec.repeat(end - start, 1)
+                _list.append(torch.cat([_input[start:end], _to_cat], dim=1))
+            decoder_h = torch.cat(_list, dim=0)
+            return decoder_h
+
+        decoder_h = torch.cat([_input, z_decoder], dim=1)
+
+        return decoder_h
+
+    def mlp_decoder_needed(self):
+        if (
+            self.noise_dim or self.pooling_type or
+            self.encoder_h_dim != self.decoder_h_dim
+        ):
+            return True
+        else:
+            return False
+
+    def forward(self, obs_traj, obs_traj_rel, seq_start_end, user_noise=None):
+        """
+        Inputs:
+        - obs_traj: Tensor of shape (obs_len, batch, 2)
+        - obs_traj_rel: Tensor of shape (obs_len, batch, 2)
+        - seq_start_end: A list of tuples which delimit sequences within batch.
+        - user_noise: Generally used for inference when you want to see
+        relation between different types of noise and outputs.
+        Output:
+        - pred_traj_rel: Tensor of shape (self.pred_len, batch, 2)
+        """
+        # Encode observed trajectory
+        # encoder_output: (batch, encoder_h_dim) - no num_layers dimension!
+        encoder_output = self.encoder(obs_traj_rel)
+        
+        # Pool States (if pooling is enabled)
+        if self.pooling_type:
+            end_pos = obs_traj[-1, :, :]  # (batch, 2)
+            # pool_net expects (batch, h_dim) or (num_layers, batch, h_dim) - handles both
+            pool_h = self.pool_net(encoder_output, seq_start_end, end_pos)
+            # Construct input for decoder context
+            mlp_decoder_context_input = torch.cat(
+                [encoder_output, pool_h], dim=1)  # (batch, encoder_h_dim + bottleneck_dim)
+        else:
+            mlp_decoder_context_input = encoder_output  # (batch, encoder_h_dim)
+
+        # Add Noise
+        if self.mlp_decoder_needed():
+            noise_input = self.mlp_decoder_context(mlp_decoder_context_input)
+        else:
+            noise_input = mlp_decoder_context_input
+        
+        # Add noise to create decoder input
+        decoder_input = self.add_noise(
+            noise_input, seq_start_end, user_noise=user_noise)  # (batch, decoder_h_dim)
+
+        # Get last positions for decoder
+        last_pos = obs_traj[-1]  # (batch, 2)
+        last_pos_rel = obs_traj_rel[-1]  # (batch, 2)
+        
+        # Decode future trajectory
+        # decoder_input becomes encoder_memory for the decoder
+        pred_traj_fake_rel = self.decoder(
+            last_pos,
+            last_pos_rel,
+            decoder_input,  # (batch, decoder_h_dim) - clean interface!
+            seq_start_end,
+        )
+
+        return pred_traj_fake_rel
+        
+
+class TrajectoryDiscriminator_Transformer(nn.Module):
+    def __init__(
+        self, obs_len, pred_len, embedding_dim=64, h_dim=64, mlp_dim=1024,
+        num_layers=1, activation='relu', batch_norm=True, dropout=0.0,
+        d_type='local'
+    ):
+        super(TrajectoryDiscriminator_Transformer, self).__init__()
+
+        self.obs_len = obs_len
+        self.pred_len = pred_len
+        self.seq_len = obs_len + pred_len
+        self.mlp_dim = mlp_dim
+        self.h_dim = h_dim
+        self.d_type = d_type
+
+        self.encoder = Encoder_Transformer(
+            embedding_dim=embedding_dim,
+            h_dim=h_dim,
+            mlp_dim=mlp_dim,
+            num_layers=num_layers,
+            dropout=dropout
+        )
+
+        real_classifier_dims = [h_dim, mlp_dim, 1]
+        self.real_classifier = make_mlp(
+            real_classifier_dims,
+            activation=activation,
+            batch_norm=batch_norm,
+            dropout=dropout
+        )
+        if d_type == 'global':
+            self.pool_net = PoolHiddenNet_Transformer(
+                embedding_dim=embedding_dim,
+                h_dim=h_dim,
+                mlp_dim=mlp_dim,
+                bottleneck_dim=h_dim,
+                activation=activation,
+                batch_norm=batch_norm,
+                dropout=dropout
+            )
+
+    def forward(self, traj, traj_rel, seq_start_end=None):
+        """
+        Inputs:
+        - traj: Tensor of shape (obs_len + pred_len, batch, 2)
+        - traj_rel: Tensor of shape (obs_len + pred_len, batch, 2)
+        - seq_start_end: A list of tuples which delimit sequences within batch
+        Output:
+        - scores: Tensor of shape (batch,) with real/fake scores
+        """
+        # Encode full trajectory
+        # encoder_output: (batch, h_dim) - no num_layers dimension!
+        encoder_output = self.encoder(traj_rel)
+        
+        # Note: In case of 'global' option we are using start_pos as opposed to
+        # end_pos. The intution being that hidden state has the whole
+        # trajectory and relative postion at the start when combined with
+        # trajectory information should help in discriminative behavior.
+        if self.d_type == 'local':
+            # Direct classification from encoder output
+            classifier_input = encoder_output  # (batch, h_dim)
+        else:
+            # Global pooling across scenes
+            classifier_input = self.pool_net(
+                encoder_output, seq_start_end, traj[0]  # (batch, h_dim)
+            )
+        
+        scores = self.real_classifier(classifier_input)
+        return scores
 
 
 # test
@@ -497,13 +722,14 @@ if __name__ == "__main__":
     h_dim = 64
     encoder = Encoder_Transformer()
     decoder = Decoder_Transformer(seq_len=12, h_dim=h_dim)
+    
     # Test the encoder
-    obs_traj = torch.randn(8, 3,2 )
-    final_h = encoder(obs_traj)
-    print(f"✅ Encoder test passed. Output shape: {final_h.shape}")
+    obs_traj = torch.randn(8, 3, 2)
+    encoder_output = encoder(obs_traj)
+    print(f"✅ Encoder test passed. Output shape: {encoder_output.shape} (expected: (3, {h_dim}))")
 
     # Test the decoder
-
+    # Scenario: 3 scenes (batches), each with 3 pedestrians
     bs = 3  # num of scenes
     num_pedestrians_per_scene = 3  # each scene has 3 pedestrians
     total_batch_size = bs * num_pedestrians_per_scene  # total = 9 pedestrians
@@ -520,15 +746,9 @@ if __name__ == "__main__":
     #    Shape: (9, 2) - 9 pedestrians, each with relative (dx, dy) coordinates
     last_pos_rel = torch.randn(total_batch_size, 2)
 
-    # 3. state_tuple: (hh, ch) where each is (num_layers, batch, h_dim)
-    #    hh: encoder hidden state (encoder output) - used as memory in transformer
-    #    ch: cell state (not used in Transformer, but kept for compatibility)
-    #    Shape: Each tensor is (1, 9, 64)
-    num_layers = 1
-    state_tuple = (
-        torch.randn(num_layers, total_batch_size, h_dim),  # hh
-        torch.randn(num_layers, total_batch_size, h_dim)   # ch
-    )
+    # 3. encoder_memory: (batch, h_dim) - encoder output (no longer a tuple!)
+    #    Shape: (9, 64) - 9 pedestrians, each with h_dim-dimensional encoding
+    encoder_memory = torch.randn(total_batch_size, h_dim)
 
     # 4. seq_start_end: List of tuples delimiting scenes within batch
     #    This tells the decoder which pedestrians belong to the same scene
@@ -540,15 +760,93 @@ if __name__ == "__main__":
         (3, 6),      # Scene 1: 3 pedestrians (indices 3, 4, 5)
         (6, 9)       # Scene 2: 3 pedestrians (indices 6, 7, 8)
     ]
+    # Convert to tensor for noise functions that expect it
+    seq_start_end_tensor = torch.tensor(seq_start_end, dtype=torch.long)
 
-    pred_traj_fake_rel, final_decoder_h = decoder(
+    # Run decoder with new clean interface (no state_tuple!)
+    pred_traj_fake_rel = decoder(
         last_pos, 
         last_pos_rel, 
-        state_tuple, 
+        encoder_memory,  # Direct encoder memory, not a tuple
         seq_start_end
     )
 
-    print("✅ Decoder test passed!")
+    print("\n✅ Decoder test passed!")
     print(f"  pred_traj_fake_rel: {pred_traj_fake_rel.shape} (seq_len={decoder.seq_len}, batch={total_batch_size}, 2)")
-    print(f"  final_decoder_h: {final_decoder_h.shape} (num_layers={num_layers}, batch={total_batch_size}, h_dim={h_dim})")
+    print(f"  Expected: ({decoder.seq_len}, {total_batch_size}, 2)")
 
+    # ==========================================
+    # Test TrajectoryGenerator_Transformer
+    # ==========================================
+    print("\n" + "="*60)
+    print("Testing TrajectoryGenerator_Transformer")
+    print("="*60)
+    
+    obs_len = 8
+    pred_len = 12
+    embedding_dim = 64
+    encoder_h_dim = 64
+    decoder_h_dim = 128
+    
+    obs_traj = torch.randn(obs_len, total_batch_size, 2)
+    obs_traj_rel = torch.randn(obs_len, total_batch_size, 2)
+    
+    # Test with noise
+    print("\nTest Generator")
+    generator = TrajectoryGenerator_Transformer(
+        obs_len=obs_len,
+        pred_len=pred_len,
+        embedding_dim=embedding_dim,
+        encoder_h_dim=encoder_h_dim,
+        decoder_h_dim=decoder_h_dim,
+        pooling_type='pool_net',
+        noise_dim=(16,),  # Add noise
+        noise_type='gaussian',
+        noise_mix_type='ped',
+        pool_every_timestep=True
+    )
+    
+    pred_traj_rel_noise = generator(obs_traj, obs_traj_rel, seq_start_end_tensor)
+    print(f"✅ Generator test passed!")
+    print(f"  Output pred_traj_rel: {pred_traj_rel_noise.shape}")
+    print(f"  Expected: ({pred_len}, {total_batch_size}, 2)")
+    
+    # ==========================================
+    # Test TrajectoryDiscriminator_Transformer
+    # ==========================================
+
+    # Test local discriminator
+    print("\nTest Discriminator (local)")
+    discriminator_local = TrajectoryDiscriminator_Transformer(
+        obs_len=obs_len,
+        pred_len=pred_len,
+        embedding_dim=embedding_dim,
+        h_dim=encoder_h_dim,
+        d_type='local'
+    )
+    
+    # Full trajectory (observed + predicted)
+    full_traj = torch.randn(obs_len + pred_len, total_batch_size, 2)
+    full_traj_rel = torch.randn(obs_len + pred_len, total_batch_size, 2)
+    
+    scores_local = discriminator_local(full_traj, full_traj_rel, seq_start_end)
+    print(f"✅ Discriminator (local) test passed!")
+    print(f"  Input full_traj: {full_traj.shape}")
+    print(f"  Input full_traj_rel: {full_traj_rel.shape}")
+    print(f"  Output scores: {scores_local.shape}")
+    print(f"  Expected: ({total_batch_size}, 1)")
+    
+    # Test global discriminator
+    print("\nTest Discriminator (global)")
+    discriminator_global = TrajectoryDiscriminator_Transformer(
+        obs_len=obs_len,
+        pred_len=pred_len,
+        embedding_dim=embedding_dim,
+        h_dim=encoder_h_dim,
+        d_type='global'
+    )
+    
+    scores_global = discriminator_global(full_traj, full_traj_rel, seq_start_end)
+    print(f"✅ Discriminator (global) test passed!")
+    print(f"  Output scores: {scores_global.shape}")
+    print(f"  Expected: ({total_batch_size}, 1)")
