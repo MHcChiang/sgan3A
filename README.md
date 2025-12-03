@@ -52,3 +52,16 @@ See `VERSION_INFO.md` for version details and `MIGRATION_SUMMARY.md` for migrati
 - CUDA: 11.8 or 12.1 (optional, for GPU)
 
 See `VERSION_INFO.md` for complete details.
+
+
+New:
+```
+# Load latest checkpoint from folder "eth"
+python scripts/analyze_checkpoint.py --folder eth
+
+# Load best checkpoint and generate plots
+python scripts/analyze_checkpoint.py --folder eth --type best --plot
+
+# Use full path
+python scripts/analyze_checkpoint.py --folder checkpoints/eth --plot
+```

@@ -1,0 +1,63 @@
+# --- Data Parameters ---
+dataset: 'hotel'
+data_root_ethucy: 'datasets/eth_ucy'
+traj_scale: 1           # ETH/UCY is usually meters. Paper uses 1 or 2 depending on normalization.
+past_frames: 8          # 3.2 seconds [cite: 273]
+future_frames: 12       # 4.8 seconds [cite: 273]
+min_past_frames: 8
+min_future_frames: 12
+frame_skip: 1           # Use every frame (if data is already 2.5Hz)
+phase: 'training'
+
+# --- Optimization ---
+# Paper uses "Adam optimizer" [cite: 287]
+batch_size: 1           # Standard for these transformers
+num_epochs: 100         # "100 epochs on ETH/UCY" [cite: 287]
+g_learning_rate: 0.0001 # "initial learning rate of 10^-4" [cite: 288]
+d_learning_rate: 0.0001
+g_steps: 1
+d_steps: 1              # Standard GAN practice (train D more)
+clipping_threshold_g: 1.5
+clipping_threshold_d: 0.0
+
+# --- Model Architecture ---
+# "two stacks ... of identical layers" [cite: 279]
+enc_layers: 2
+dec_layers: 2
+input_type: 'pos'
+
+motion_dim: 2
+forecast_dim: 2
+
+# "dimensions dk, dv, dtau ... are all set to 256" [cite: 280]
+tf_model_dim: 256
+
+# "number of heads ... is 8" [cite: 280]
+tf_nhead: 8
+
+# "hidden dimension of feedforward layers is 512" [cite: 280]
+tf_ff_dim: 512
+
+# "0.1 dropout rate" [cite: 279]
+tf_dropout: 0.1
+
+pos_concat: true        # Required for time encoder design
+
+# "latent code dimension dz is 32" [cite: 281]
+nz: 32
+z_type: 'gaussian'
+
+# --- CVAE Control ---
+use_cvae: 0             
+kl_weight: 1.0          # "coefficient beta ... equals 1" [cite: 281]
+l2_loss_weight: 0.1
+
+# --- Output ---
+output_dir: './checkpoints/eth_bs1_Dstep1'
+print_every: 100
+checkpoint_every: 1000
+checkpoint_name: 'eth_bs1_Dstep1'
+restore_from_checkpoint: 0
+num_samples_check: 500
+use_gpu: 1
+gpu_num: "0"

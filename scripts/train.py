@@ -17,14 +17,18 @@ import torch.nn as nn
 import torch.optim as optim
 import yaml
 
-from sgan.data.loader import data_loader
-from sgan.losses import gan_g_loss, gan_d_loss, l2_loss
-from sgan.losses import displacement_error, final_displacement_error
+from model.data.loader import data_loader
+from model.losses import (
+    gan_g_loss,
+    gan_d_loss,
+    l2_loss,
+    displacement_error,
+    final_displacement_error,
+)
+from model.utils import int_tuple, bool_flag, get_total_norm
+from model.utils import relative_to_abs, get_dset_path
 
-from sgan.models import TrajectoryGenerator, TrajectoryDiscriminator
-from sgan.sganT import TrajectoryGenerator_Transformer, TrajectoryDiscriminator_Transformer
-from sgan.utils import int_tuple, bool_flag, get_total_norm
-from sgan.utils import relative_to_abs, get_dset_path
+from model.sgan3A import AgentFormerGenerator, AgentFormerDiscriminator
 
 torch.backends.cudnn.benchmark = True
 
@@ -34,7 +38,8 @@ logging.basicConfig(level=logging.INFO, format=FORMAT, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 # Dataset options
-parser.add_argument('--dataset_name', default='zara1', type=str)
+parser.add_argument('--dataset_name', default='zara1', type=str,
+                    help='Dataset name: zara1, zara2, eth, hotel, univ, or "all" to use all datasets')
 parser.add_argument('--delim', default=' ')
 parser.add_argument('--loader_num_workers', default=4, type=int)
 parser.add_argument('--obs_len', default=8, type=int)
@@ -143,22 +148,82 @@ def get_device(args):
     return device
 
 
+def build_generator_cfg(args):
+    return {
+        'obs_len': args.obs_len,
+        'pred_len': args.pred_len,
+        'embedding_dim': args.embedding_dim,
+        'encoder_h_dim': args.encoder_h_dim_g,
+        'decoder_h_dim': args.decoder_h_dim_g,
+        'mlp_dim': args.mlp_dim,
+        'num_layers': args.num_layers,
+        'noise_dim': args.noise_dim,
+        'noise_type': args.noise_type,
+        'noise_mix_type': args.noise_mix_type,
+        'pooling_type': args.pooling_type,
+        'pool_every_timestep': args.pool_every_timestep,
+        'dropout': args.dropout,
+        'bottleneck_dim': args.bottleneck_dim,
+        'activation': 'relu',
+        'batch_norm': args.batch_norm,
+        'neighborhood_size': args.neighborhood_size,
+        'grid_size': args.grid_size,
+    }
+
+
+def build_discriminator_cfg(args):
+    return {
+        'obs_len': args.obs_len,
+        'pred_len': args.pred_len,
+        'embedding_dim': args.embedding_dim,
+        'h_dim': args.encoder_h_dim_d,
+        'mlp_dim': args.mlp_dim,
+        'num_layers': args.num_layers,
+        'activation': 'relu',
+        'batch_norm': args.batch_norm,
+        'dropout': args.dropout,
+        'd_type': args.d_type,
+    }
+
+
 def main(args):
+    # Create output directory if it doesn't exist
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir, exist_ok=True)
+        logger.info(f'Created output directory: {args.output_dir}')
+    else:
+        logger.info(f'Using existing output directory: {args.output_dir}')
+    
     # Only set CUDA_VISIBLE_DEVICES if using GPU and CUDA is available
     if args.use_gpu == 1 and torch.cuda.is_available():
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_num
     
-    train_path = get_dset_path(args.dataset_name, 'train')
-    val_path = get_dset_path(args.dataset_name, 'val')
+    # New: Handle "all" datasets option
+    if args.dataset_name.lower() == 'all':
+        # List of all available datasets
+        all_datasets = ['zara1', 'zara2', 'eth', 'hotel', 'univ']
+        logger.info(f'Loading all datasets: {all_datasets}')
+        train_paths = [get_dset_path(dset, 'train') for dset in all_datasets]
+        val_paths = [get_dset_path(dset, 'val') for dset in all_datasets]
+        
+        # Verify all paths exist
+        for dset, train_path in zip(all_datasets, train_paths):
+            if not os.path.exists(train_path):
+                logger.warning(f'Dataset {dset} train path not found: {train_path}')
+    else:
+        # Single dataset
+        train_paths = get_dset_path(args.dataset_name, 'train')
+        val_paths = get_dset_path(args.dataset_name, 'val')
+        logger.info(f'Loading single dataset: {args.dataset_name}')
 
     # Get device object (device-agnostic for Mac/CPU compatibility)
     device = get_device(args)
     logger.info(f'Using device: {device}')
 
     logger.info("Initializing train dataset")
-    train_dset, train_loader = data_loader(args, train_path)
+    train_dset, train_loader = data_loader(args, train_paths)
     logger.info("Initializing val dataset")
-    _, val_loader = data_loader(args, val_path)
+    _, val_loader = data_loader(args, val_paths)
 
     iterations_per_epoch = len(train_dset) / args.batch_size / args.d_steps
     if args.num_epochs:
@@ -169,68 +234,13 @@ def main(args):
     )
 
     # Choose model architecture
-    logger.info(f'Using model architecture: {args.model_type}')
-    
-    if args.model_type == 'transformer':
-        generator = TrajectoryGenerator_Transformer(
-            obs_len=args.obs_len,
-            pred_len=args.pred_len,
-            embedding_dim=args.embedding_dim,
-            encoder_h_dim=args.encoder_h_dim_g,
-            decoder_h_dim=args.decoder_h_dim_g,
-            mlp_dim=args.mlp_dim,
-            num_layers=args.num_layers,
-            noise_dim=args.noise_dim,
-            noise_type=args.noise_type,
-            noise_mix_type=args.noise_mix_type,
-            pooling_type=args.pooling_type,
-            pool_every_timestep=args.pool_every_timestep,
-            dropout=args.dropout,
-            bottleneck_dim=args.bottleneck_dim,
-            neighborhood_size=args.neighborhood_size,
-            grid_size=args.grid_size,
-            batch_norm=args.batch_norm)
-        
-        discriminator = TrajectoryDiscriminator_Transformer(
-            obs_len=args.obs_len,
-            pred_len=args.pred_len,
-            embedding_dim=args.embedding_dim,
-            h_dim=args.encoder_h_dim_d,
-            mlp_dim=args.mlp_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            batch_norm=args.batch_norm,
-            d_type=args.d_type)
-    else:  # LSTM (default)
-        generator = TrajectoryGenerator(
-            obs_len=args.obs_len,
-            pred_len=args.pred_len,
-            embedding_dim=args.embedding_dim,
-            encoder_h_dim=args.encoder_h_dim_g,
-            decoder_h_dim=args.decoder_h_dim_g,
-            mlp_dim=args.mlp_dim,
-            num_layers=args.num_layers,
-            noise_dim=args.noise_dim,
-            noise_type=args.noise_type,
-            noise_mix_type=args.noise_mix_type,
-            pooling_type=args.pooling_type,
-            pool_every_timestep=args.pool_every_timestep,
-            dropout=args.dropout,
-            bottleneck_dim=args.bottleneck_dim,
-            neighborhood_size=args.neighborhood_size,
-            grid_size=args.grid_size,
-            batch_norm=args.batch_norm)
-        
-        discriminator = TrajectoryDiscriminator(
-            obs_len=args.obs_len,
-            pred_len=args.pred_len,
-            embedding_dim=args.embedding_dim,
-            h_dim=args.encoder_h_dim_d,
-            mlp_dim=args.mlp_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            batch_norm=args.batch_norm,
-            d_type=args.d_type)
+    if args.model_type != 'transformer':
+        raise ValueError('Only the AgentFormer (transformer) generator is supported in this build.')
+    logger.info('Using AgentFormer generator/discriminator')
+    generator_cfg = build_generator_cfg(args)
+    discriminator_cfg = build_discriminator_cfg(args)
+    generator = TrajectoryGenerator_AgentFormer.from_cfg(generator_cfg)
+    discriminator = TrajectoryDiscriminator_AgentFormer.from_cfg(discriminator_cfg)
 
     generator.apply(init_weights)
     generator = generator.to(device)
@@ -301,6 +311,7 @@ def main(args):
             'best_t_nl': None,
         }
     t0 = None
+    # Main training loop
     while t < args.num_iterations:
         gc.collect()
         d_steps_left = args.d_steps
@@ -399,8 +410,7 @@ def main(args):
                     checkpoint['g_best_nl_state'] = generator.state_dict()
                     checkpoint['d_best_nl_state'] = discriminator.state_dict()
 
-                # Save another checkpoint with model weights and
-                # optimizer state
+                # Save another checkpoint with model weights and optimizer state
                 checkpoint['g_state'] = generator.state_dict()
                 checkpoint['g_optim_state'] = optimizer_g.state_dict()
                 checkpoint['d_state'] = discriminator.state_dict()
@@ -439,25 +449,42 @@ def main(args):
 def discriminator_step(
     args, batch, generator, discriminator, d_loss_fn, optimizer_d, device
 ):
-    # Move batch to device (device-agnostic: works on CPU/Mac and GPU)
-    batch = [tensor.to(device) for tensor in batch]
-    (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
-     loss_mask, seq_start_end) = batch
+    """
+    Discriminator training step using AgentFormer's data format directly.
+    """
+    # batch is in AgentFormer's format (dictionary)
+    import numpy as np
     losses = {}
     loss = torch.zeros(1, device=device)
 
-    generator_out = generator(obs_traj, obs_traj_rel, seq_start_end)
-
-    pred_traj_fake_rel = generator_out
+    # Generate fake trajectories
+    pred_traj_fake_rel = generator(batch)  # (pred_len, num_agents, 2)
+    
+    # Convert to absolute for creating discriminator input
+    pre_motion_list = batch['pre_motion_3D']
+    num_agents = len(pre_motion_list)
+    obs_traj = torch.stack([torch.from_numpy(m).float() for m in pre_motion_list], dim=0)
+    obs_traj = obs_traj.transpose(0, 1).to(device)  # (obs_len, num_agents, 2)
+    
     pred_traj_fake = relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
+    
+    # Create data dictionaries for discriminator (AgentFormer format)
+    # Real trajectory
+    traj_real_data = {
+        'pre_motion_3D': batch['pre_motion_3D'],
+        'fut_motion_3D': batch['fut_motion_3D'],
+        'seq_start_end': batch.get('seq_start_end', [(0, num_agents)])
+    }
+    
+    # Fake trajectory: convert fake predictions back to list format
+    traj_fake_data = {
+        'pre_motion_3D': batch['pre_motion_3D'],
+        'fut_motion_3D': [pred_traj_fake[:, i].cpu().numpy() for i in range(num_agents)],
+        'seq_start_end': batch.get('seq_start_end', [(0, num_agents)])
+    }
 
-    traj_real = torch.cat([obs_traj, pred_traj_gt], dim=0)
-    traj_real_rel = torch.cat([obs_traj_rel, pred_traj_gt_rel], dim=0)
-    traj_fake = torch.cat([obs_traj, pred_traj_fake], dim=0)
-    traj_fake_rel = torch.cat([obs_traj_rel, pred_traj_fake_rel], dim=0)
-
-    scores_fake = discriminator(traj_fake, traj_fake_rel, seq_start_end)
-    scores_real = discriminator(traj_real, traj_real_rel, seq_start_end)
+    scores_fake = discriminator(traj_fake_data)
+    scores_real = discriminator(traj_real_data)
 
     # Compute loss with optional gradient penalty
     data_loss = d_loss_fn(scores_real, scores_fake)
@@ -478,23 +505,44 @@ def discriminator_step(
 def generator_step(
     args, batch, generator, discriminator, g_loss_fn, optimizer_g, device
 ):
-    # Move batch to device (device-agnostic: works on CPU/Mac and GPU)
-    batch = [tensor.to(device) for tensor in batch]
-    (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,
-     loss_mask, seq_start_end) = batch
+    """
+    Generator training step using AgentFormer's data format directly.
+    """
+    # batch is in AgentFormer's format (dictionary)
+    import numpy as np
     losses = {}
     loss = torch.zeros(1, device=device)
     g_l2_loss_rel = []
 
-    loss_mask = loss_mask[:, args.obs_len:]
+    # Convert to tensors for loss computation
+    pre_motion_list = batch['pre_motion_3D']
+    fut_motion_list = batch['fut_motion_3D']
+    fut_mask_list = batch['fut_motion_mask']
+    num_agents = len(pre_motion_list)
+    
+    obs_traj = torch.stack([torch.from_numpy(m).float() for m in pre_motion_list], dim=0)
+    obs_traj = obs_traj.transpose(0, 1).to(device)  # (obs_len, num_agents, 2)
+    
+    pred_traj_gt = torch.stack([torch.from_numpy(m).float() for m in fut_motion_list], dim=0)
+    pred_traj_gt = pred_traj_gt.transpose(0, 1).to(device)  # (pred_len, num_agents, 2)
+    
+    # Compute relative trajectories for loss
+    pred_traj_gt_rel = pred_traj_gt - torch.cat([obs_traj[-1:], pred_traj_gt[:-1]], dim=0)
+    
+    # Loss mask
+    loss_mask = torch.stack([torch.from_numpy(m).float() for m in fut_mask_list], dim=0)
+    loss_mask = loss_mask.transpose(0, 1).to(device)  # (num_agents, pred_len)
+    loss_mask = loss_mask[:, args.obs_len:]  # Only future timesteps
+    
+    seq_start_end = batch.get('seq_start_end', [(0, num_agents)])
+    if isinstance(seq_start_end, list):
+        seq_start_end = torch.tensor(seq_start_end, dtype=torch.long, device=device)
 
     # Generate k predictions (variety loss)
     for _ in range(args.best_k):
-        generator_out = generator(obs_traj, obs_traj_rel, seq_start_end)
-
-        pred_traj_fake_rel = generator_out
-        pred_traj_fake = relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
-        # Compute L2 loss for each prediction and store in g_l2_loss_rel
+        pred_traj_fake_rel = generator(batch)  # (pred_len, num_agents, 2)
+        
+        # Compute L2 loss for each prediction
         if args.l2_loss_weight > 0:
             g_l2_loss_rel.append(args.l2_loss_weight * l2_loss(
                 pred_traj_fake_rel,
@@ -506,8 +554,7 @@ def generator_step(
     g_l2_loss_sum_rel = torch.zeros(1, device=device)
     if args.l2_loss_weight > 0:
         g_l2_loss_rel = torch.stack(g_l2_loss_rel, dim=1)
-        # Remove .data attribute usage (deprecated in modern PyTorch)
-        for start, end in seq_start_end:
+        for start, end in seq_start_end.tolist():
             _g_l2_loss_rel = g_l2_loss_rel[start:end]
             _g_l2_loss_rel = torch.sum(_g_l2_loss_rel, dim=0)
             _g_l2_loss_rel = torch.min(_g_l2_loss_rel) / torch.sum(
@@ -516,10 +563,18 @@ def generator_step(
         losses['G_l2_loss_rel'] = g_l2_loss_sum_rel.item()
         loss += g_l2_loss_sum_rel
 
-    traj_fake = torch.cat([obs_traj, pred_traj_fake], dim=0)
-    traj_fake_rel = torch.cat([obs_traj_rel, pred_traj_fake_rel], dim=0)
+    # Get last prediction for discriminator
+    pred_traj_fake_rel = generator(batch)
+    pred_traj_fake = relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
+    
+    # Create discriminator input (AgentFormer format)
+    traj_fake_data = {
+        'pre_motion_3D': batch['pre_motion_3D'],
+        'fut_motion_3D': [pred_traj_fake[:, i].cpu().numpy() for i in range(num_agents)],
+        'seq_start_end': batch.get('seq_start_end', [(0, num_agents)])
+    }
 
-    scores_fake = discriminator(traj_fake, traj_fake_rel, seq_start_end)
+    scores_fake = discriminator(traj_fake_data)
     discriminator_loss = g_loss_fn(scores_fake)
 
     loss += discriminator_loss
@@ -550,16 +605,37 @@ def check_accuracy(
     generator.eval()
     with torch.no_grad():
         for batch in loader:
-            # Move batch to device (device-agnostic: works on CPU/Mac and GPU)
-            batch = [tensor.to(device) for tensor in batch]
-            (obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel,
-             non_linear_ped, loss_mask, seq_start_end) = batch
-            linear_ped = 1 - non_linear_ped
+            # batch is in AgentFormer's format (dictionary)
+            import numpy as np
+            
+            # Convert to tensors for metric computation
+            pre_motion_list = batch['pre_motion_3D']
+            fut_motion_list = batch['fut_motion_3D']
+            fut_mask_list = batch['fut_motion_mask']
+            num_agents = len(pre_motion_list)
+            
+            obs_traj = torch.stack([torch.from_numpy(m).float() for m in pre_motion_list], dim=0)
+            obs_traj = obs_traj.transpose(0, 1).to(device)
+            
+            pred_traj_gt = torch.stack([torch.from_numpy(m).float() for m in fut_motion_list], dim=0)
+            pred_traj_gt = pred_traj_gt.transpose(0, 1).to(device)
+            
+            # Compute relative for loss
+            pred_traj_gt_rel = pred_traj_gt - torch.cat([obs_traj[-1:], pred_traj_gt[:-1]], dim=0)
+            
+            loss_mask = torch.stack([torch.from_numpy(m).float() for m in fut_mask_list], dim=0)
+            loss_mask = loss_mask.transpose(0, 1).to(device)
             loss_mask = loss_mask[:, args.obs_len:]
+            
+            # Non-linear ped (simplified)
+            non_linear_ped = torch.ones(num_agents, dtype=torch.bool, device=device)
+            linear_ped = 1 - non_linear_ped.float()
+            
+            seq_start_end = batch.get('seq_start_end', [(0, num_agents)])
+            if isinstance(seq_start_end, list):
+                seq_start_end = torch.tensor(seq_start_end, dtype=torch.long, device=device)
 
-            pred_traj_fake_rel = generator(
-                obs_traj, obs_traj_rel, seq_start_end
-            )
+            pred_traj_fake_rel = generator(batch)
             pred_traj_fake = relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
 
             g_l2_loss_abs, g_l2_loss_rel = cal_l2_losses(
@@ -574,13 +650,21 @@ def check_accuracy(
                 pred_traj_gt, pred_traj_fake, linear_ped, non_linear_ped
             )
 
-            traj_real = torch.cat([obs_traj, pred_traj_gt], dim=0)
-            traj_real_rel = torch.cat([obs_traj_rel, pred_traj_gt_rel], dim=0)
-            traj_fake = torch.cat([obs_traj, pred_traj_fake], dim=0)
-            traj_fake_rel = torch.cat([obs_traj_rel, pred_traj_fake_rel], dim=0)
+            # Create discriminator inputs in AgentFormer format
+            traj_real_data = {
+                'pre_motion_3D': batch['pre_motion_3D'],
+                'fut_motion_3D': batch['fut_motion_3D'],
+                'seq_start_end': batch.get('seq_start_end', [(0, num_agents)])
+            }
+            
+            traj_fake_data = {
+                'pre_motion_3D': batch['pre_motion_3D'],
+                'fut_motion_3D': [pred_traj_fake[:, i].cpu().numpy() for i in range(num_agents)],
+                'seq_start_end': batch.get('seq_start_end', [(0, num_agents)])
+            }
 
-            scores_fake = discriminator(traj_fake, traj_fake_rel, seq_start_end)
-            scores_real = discriminator(traj_real, traj_real_rel, seq_start_end)
+            scores_fake = discriminator(traj_fake_data)
+            scores_real = discriminator(traj_real_data)
 
             d_loss = d_loss_fn(scores_real, scores_fake)
             d_losses.append(d_loss.item())
