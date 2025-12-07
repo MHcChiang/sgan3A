@@ -1,7 +1,6 @@
 import argparse
 import os
 import sys
-from torch.distributed import batch_isend_irecv
 import yaml
 import torch
 import numpy as np
@@ -13,131 +12,38 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-
 sys.path.append(os.getcwd())
 from model.data.dataloader import data_generator
 from model.sgan3A import AgentFormerGenerator
 from utils.logger import Logger
 
-# ==========================================
-# 1. Helpers (Reused from train_sgan3A.py)
-# ==========================================
-def get_device(args):
-    return torch.device('cuda') if args.use_gpu and torch.cuda.is_available() else torch.device('cpu')
-
-
-def prepare_batch(batch, device):
-    def to_tensor(x):
-        if isinstance(x, torch.Tensor): return x.clone().detach().float()
-        elif isinstance(x, np.ndarray): return torch.from_numpy(x).float()
-        else: return torch.tensor(x).float()
-
-    data = {}
-    pre_motion = torch.stack([to_tensor(m) for m in batch['pre_motion_3D']], dim=0).to(device)
-    pre_motion = pre_motion.transpose(0, 1).contiguous()
-    
-    fut_motion = torch.stack([to_tensor(m) for m in batch['fut_motion_3D']], dim=0).to(device)
-    fut_motion = fut_motion.transpose(0, 1).contiguous()
-
-    data['pre_motion'] = pre_motion
-    data['fut_motion'] = fut_motion
-    data['agent_num'] = pre_motion.shape[1]
-    
-    if 'agent_mask' in batch:
-        data['agent_mask'] = to_tensor(batch['agent_mask']).to(device)
-    else:
-        data['agent_mask'] = torch.zeros(data['agent_num'], data['agent_num']).to(device)
-
-    data['heading'] = torch.zeros(data['agent_num']).to(device)
-    data['heading_vec'] = torch.zeros(data['agent_num'], 2).to(device)
-    data['pre_vel'] = torch.zeros_like(pre_motion)
-    data['pre_motion_scene_norm'] = pre_motion
-    data['agent_enc_shuffle'] = None
-    
-    if 'fut_motion_mask' in batch:
-        mask = torch.stack([to_tensor(m) for m in batch['fut_motion_mask']], dim=0).to(device)
-        data['fut_mask'] = mask.transpose(0, 1).contiguous()
-    
-    return data
+# Import helper functions from train_sgan3A.py
+from scripts.train_sgan3A import (
+    get_device,
+    prepare_batch,
+    collate_scenes,
+    fetch_and_collate_batch,
+    check_accuracy
+)
 
 # ==========================================
-# 2. Evaluation Loop
+# 2. Evaluation Loop (Using check_accuracy from train_sgan3A.py)
 # ==========================================
 def evaluate(args, loader, generator):
-    ade_outer, fde_outer = [], []
-    total_traj = 0
-    device = get_device(args)
+    """
+    Evaluate model using check_accuracy from train_sgan3A.py.
+    """
+    logger.info(f"Starting Evaluation (Best-of-{args.sample_k})...")
     
-    generator.eval()
-    if hasattr(loader, 'reset'): loader.reset()
-    else: loader.index = 0
+    # Use check_accuracy from train_sgan3A.py
+    # Set num_samples_check if not already set (for limit parameter)
+    if not hasattr(args, 'num_samples_check') or args.num_samples_check is None:
+        args.num_samples_check = 500  # Default limit
     
-    K = args.sample_k 
-    logger.info(f"Starting Evaluation (Best-of-{K})...")
+    limit = args.num_samples_check > 0
+    metrics = check_accuracy(args, loader, generator, limit=limit, k=args.sample_k, augment=False)
     
-    i = 1
-    with torch.no_grad():
-        while not loader.is_epoch_end():
-            # 1. Fetch One Sample
-            raw_batch = loader()
-            if raw_batch is None: continue
-            
-            # 2. Convert
-            batch = prepare_batch(raw_batch, device)
-            
-            pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
-            
-            # 3. Generate K Samples
-            batch_samples = []
-            for _ in range(K):
-                # Generate
-                pred_fake, _ = generator(batch) 
-                
-                # Permute: [Agents, Time] -> [Time, Agents] to match Real
-                pred_fake = pred_fake.permute(1, 0, 2)
-                batch_samples.append(pred_fake.unsqueeze(0)) 
-                
-            # Stack K samples: [K, Time, Agents, 2]
-            all_preds = torch.cat(batch_samples, dim=0)
-            
-            # 4. Compute Metrics
-            # Expand Ground Truth: [1, Time, Agents, 2]
-            gt_expanded = pred_real_abs.unsqueeze(0)
-            
-            # Distance: [K, Time, Agents]
-            diff = all_preds - gt_expanded
-            dist = torch.norm(diff, dim=-1)
-            
-            # Metrics per sample
-            ade_per_sample = dist.mean(dim=1) # [K, Agents]
-            fde_per_sample = dist[:, -1, :]   # [K, Agents]
-            # breakpoint()
-            # Handle Masks
-            if 'fut_mask' in batch:
-                valid_mask = batch['fut_mask'] > 0 # [Time, Agents]
-                valid_counts = valid_mask.sum(dim=0).unsqueeze(0) # [1, Agents]
-                
-                masked_dist = dist * valid_mask.unsqueeze(0)
-                ade_per_sample = masked_dist.sum(dim=1) / (valid_counts + 1e-6)
-                
-                last_valid = valid_mask[-1].unsqueeze(0)
-                fde_per_sample = fde_per_sample * last_valid
-
-            # Select Best Sample (Min Error)
-            min_ade, _ = ade_per_sample.min(dim=0) # [Agents]
-            min_fde, _ = fde_per_sample.min(dim=0) # [Agents]
-            print(f"scene: {i}, ade: {min_ade}, fde: {min_fde}")
-            ade_outer.append(min_ade)
-            fde_outer.append(min_fde)
-            total_traj += batch['agent_num']
-
-    if len(ade_outer) > 0:
-        ade_score = torch.cat(ade_outer).mean().item()
-        fde_score = torch.cat(fde_outer).mean().item()
-    else:
-        ade_score, fde_score = 0.0, 0.0
-    
-    return ade_score, fde_score
+    return metrics['ade'], metrics['fde']
 
 
 def draw_trajectory(args, loader, generator):
@@ -150,18 +56,19 @@ def draw_trajectory(args, loader, generator):
     """
     logger.info("Drawing trajectories...")
     generator.eval()
-    # loader.shuffle()
+    loader.shuffle()
     if hasattr(loader, 'reset'): loader.reset()
     else: loader.index = 0
     
     viz_samples = []
-    device = get_device(args)
+    device = torch.device('cpu')  # Force CPU for testing
     K = args.sample_k
     
     # --- 1. Collect 10 Samples ---
     with torch.no_grad():
         while len(viz_samples) < 10 and not loader.is_epoch_end():
-            raw_batch = loader()
+            # Use fetch_and_collate_batch for consistency
+            raw_batch = fetch_and_collate_batch(loader, batch_size=1, augment=False)
             if raw_batch is None: continue
             
             batch = prepare_batch(raw_batch, device)
@@ -257,8 +164,9 @@ def main(args):
         os.makedirs(output_dir, exist_ok=True)
     logger = Logger(os.path.join(output_dir, 'log_test.txt'))
     
-    device = get_device(args)
-    logger.info(f'Using device: {device}')
+    # Force CPU usage for testing
+    device = torch.device('cpu')
+    logger.info(f'Using device: {device} (forced CPU for testing)')
 
     # --- Load Model Config ---
     # Inject missing dictionaries needed by AgentFormerGenerator
@@ -296,7 +204,7 @@ def main(args):
     
     # --- Initialize Test Data ---
     logger.info(f"Loading Test Data for {args.dataset}...")
-    test_gen = data_generator(args, logger, split='test', phase='testing')
+    test_gen = data_generator(args, logger, split='test', phase='testing') # val or test
     
     if args.draw:
         draw_trajectory(args, test_gen, generator)
@@ -309,6 +217,7 @@ def main(args):
     logger.info(f"Samples (K): {args.sample_k}")
     logger.info(f"ADE: {ade:.4f}")
     logger.info(f"FDE: {fde:.4f}")
+    logger.info(f"ADE+FDE: {ade+fde:.4f}")
     logger.info("="*30)
 
 
@@ -326,7 +235,8 @@ if __name__ == '__main__':
     parser.add_argument('--data_root_ethucy', default='datasets/eth_ucy', type=str)
     parser.add_argument('--data_root_nuscenes_pred', default='datasets/nuscenes_pred', type=str)
     parser.add_argument('--sample_k', default=20, type=int, help='Number of samples for Best-of-K evaluation')
-    parser.add_argument('--batch_size', default=8, type=int)
+    parser.add_argument('--batch_size', default=1, type=int, help='Batch size for evaluation')
+    parser.add_argument('--num_samples_check', default=None, type=int, help='Limit number of samples to evaluate (None = all)')
     
     # --- AgentFormer Params (Defaults will be overwritten by config_saved.yaml) ---
     parser.add_argument('--traj_scale', default=1, type=int)
@@ -353,7 +263,7 @@ if __name__ == '__main__':
     parser.add_argument('--min_future_frames', default=12, type=int)
     parser.add_argument('--frame_skip', default=1, type=int)
     # parser.add_argument('--output_dir', default='./results/test_output')
-    parser.add_argument('--use_gpu', default=1, type=int)
+    parser.add_argument('--use_gpu', default=0, type=int)
     
     args = parser.parse_args()
 

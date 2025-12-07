@@ -7,6 +7,7 @@ import time
 import numpy as np
 from collections import defaultdict
 import yaml
+import copy
 
 import torch
 import torch.nn as nn
@@ -61,6 +62,9 @@ parser.add_argument('--g_steps', default=1, type=int)
 parser.add_argument('--d_steps', default=2, type=int)
 parser.add_argument('--clipping_threshold_g', default=0, type=float)
 parser.add_argument('--clipping_threshold_d', default=0, type=float)
+parser.add_argument('--k', default=1, type=int, help='Number of samples for Variety Loss')
+parser.add_argument('--warmup_epochs', default=3, type=int, help='Number of epochs to train G only on L2 loss')
+parser.add_argument('--resume_warmup_from', default=None, type=str, help='Path to pre-trained warm-up model')
 
 # --- Learning Rate Scheduler ---
 parser.add_argument('--scheduler_type', default='none', type=str,
@@ -129,7 +133,48 @@ def init_weights(m):
 
 
 def get_device(args):
-    return torch.device('cuda') if args.use_gpu and torch.cuda.is_available() else torch.device('cpu')
+    """
+    Get the appropriate device (CPU or GPU) based on arguments.
+    
+    Args:
+        args: Arguments object with use_gpu and gpu_num attributes
+    
+    Returns:
+        torch.device object
+    """
+    # Convert use_gpu to int if it's a boolean or string
+    use_gpu = args.use_gpu
+    if isinstance(use_gpu, bool):
+        use_gpu = 1 if use_gpu else 0
+    elif isinstance(use_gpu, str):
+        use_gpu = int(use_gpu)
+    else:
+        use_gpu = int(use_gpu)
+    
+    if use_gpu and torch.cuda.is_available():
+        # Select specific GPU if gpu_num is provided
+        gpu_num = args.gpu_num
+        if isinstance(gpu_num, str):
+            gpu_num = int(gpu_num)
+        else:
+            gpu_num = int(gpu_num)
+        
+        # Set the default CUDA device
+        torch.cuda.set_device(gpu_num)
+        device = torch.device(f'cuda:{gpu_num}')
+        
+        # Verify device is accessible
+        try:
+            torch.cuda.get_device_properties(gpu_num)
+            return device
+        except Exception as e:
+            print(f"Warning: Could not access GPU {gpu_num}: {e}")
+            print("Falling back to CPU")
+            return torch.device('cpu')
+    else:
+        if use_gpu:
+            print("Warning: use_gpu is set to 1 but CUDA is not available. Using CPU.")
+        return torch.device('cpu')
 
 
 def create_scheduler(optimizer, scheduler_type, num_epochs, args):
@@ -201,6 +246,7 @@ def collate_scenes(scenes, mask=False):
         big_mask = np.full((total_agents, total_agents), float('-inf'), dtype=np.float32)
         current_idx = 0
         for n_agents in agents_per_scene:
+            # scene mask
             scene_mask = np.zeros((n_agents, n_agents), dtype=np.float32)
             big_mask[current_idx : current_idx+n_agents, 
                     current_idx : current_idx+n_agents] = scene_mask
@@ -210,26 +256,65 @@ def collate_scenes(scenes, mask=False):
     return batch_data
 
 
-def fetch_and_collate_batch(generator, batch_size):
+def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_limit=10):
     """
-    Fetches 'batch_size' scenes and collates them.
+    Fetches scenes and applies Online Augmentation (Data Doubling). Agent-Cap Batching (Soft Limit Strategy)
+    1. Fetches half batch if augment is True.
+    2. Duplicates and rotates the fetched scenes.
+    3. Collates everything into a single batch.
     """
     scene_samples = []
-    while len(scene_samples) < batch_size:
-        if not generator.is_epoch_end():
-            scene = generator()
-            if scene is not None:
-                scene_samples.append(scene)
-        else:   
+    total_agents_in_batch = 0
+    
+    # 1. define the number of scenes to fetch
+    num_to_fetch = batch_size // 2 if augment else batch_size
+    if num_to_fetch < 1: num_to_fetch = 1
+
+    # 2. ferch
+    while len(scene_samples) < num_to_fetch:
+        if generator.is_epoch_end():
             break
+
+        scene = generator()
+        if scene is None: continue
+        # add scene to scene_samples
+        scene_samples.append(scene)
+        # cal #agents
+        current_scene_agents = len(scene['pre_motion_3D'])
+        if augment:
+            current_scene_agents *= 2
             
-    if len(scene_samples) > 0:
-        return collate_scenes(scene_samples, mask=batch_size>1)
-    else:
+        total_agents_in_batch += current_scene_agents
+
+        # check if total_agents_in_batch is greater than max_agents_limit
+        if total_agents_in_batch > max_agents_limit:
+            break
+
+    if len(scene_samples) == 0:
         return None
 
+    # 3. 執行 Online Augmentation (Data Doubling)
+    if augment:
+        augmented_samples = []
+        for scene in scene_samples:
+            # 深拷貝以避免修改到原始數據
+            aug_scene = copy.deepcopy(scene)
+            
+            # Rotate by 2 * pi / 24 = pi / 12 (15 degrees interval)
+            k = np.random.randint(0, 24) 
+            angle = k * (2 * np.pi / 24)
+        
+            aug_scene = rotate_scene(aug_scene, angle)
+            augmented_samples.append(aug_scene)
+        
+        scene_samples.extend(augmented_samples)
 
-def prepare_batch(batch, device, augment=False):
+    # 4. Collate 
+    # mask=True 代表會建立 Agent Mask (Block Diagonal)，這裡會自動處理變大後的 batch
+    return collate_scenes(scene_samples, mask=len(scene_samples)>1)
+
+
+def prepare_batch(batch, device):
     """
     Converts list of numpy arrays from data_generator into Tensor dictionary.
     Handles 'One Scene' logic correctly.
@@ -250,22 +335,22 @@ def prepare_batch(batch, device, augment=False):
     fut_motion = fut_motion.transpose(0, 1).contiguous()
     # print(f"transpose: {pre_motion.shape}")
 
-    # --- DATA AUGMENTATION (Random Rotation) ---
-    if augment:
-        # Generate random angle: 0 to 2*pi
-        theta = torch.rand(1).to(device) * 2 * np.pi
-        c, s = torch.cos(theta), torch.sin(theta)
+    # # --- DATA AUGMENTATION (Random Rotation) ---
+    # if augment:
+    #     # Generate random angle: 0 to 2*pi
+    #     theta = torch.rand(1).to(device) * 2 * np.pi
+    #     c, s = torch.cos(theta), torch.sin(theta)
         
-        # Apply to Past and Future
-        pre_motion = rotate_tensor(pre_motion,c ,s)
-        fut_motion = rotate_tensor(fut_motion, c, s)
+    #     # Apply to Past and Future
+    #     pre_motion = rotate_tensor(pre_motion,c ,s)
+    #     fut_motion = rotate_tensor(fut_motion, c, s)
         
-        # Note: If you use 'heading' (yaw), you must rotate that too
-        if 'heading' in batch and batch['heading'] is not None:
-             # This part might need adjustment depending on how 'heading' is stored
-             # Usually it is a list of floats (radians)
-             # batch['heading'] is a list, so we handle it later or ignore if not used
-             pass
+    #     # Note: If you use 'heading' (yaw), you must rotate that too
+    #     if 'heading' in batch and batch['heading'] is not None:
+    #          # This part might need adjustment depending on how 'heading' is stored
+    #          # Usually it is a list of floats (radians)
+    #          # batch['heading'] is a list, so we handle it later or ignore if not used
+    #          pass
 
     data['pre_motion'] = pre_motion
     data['fut_motion'] = fut_motion
@@ -279,11 +364,11 @@ def prepare_batch(batch, device, augment=False):
     else:
         data['agent_mask'] = torch.zeros(data['agent_num'], data['agent_num']).to(device)
 
-    data['heading'] = torch.zeros(data['agent_num']).to(device)
-    data['heading_vec'] = torch.zeros(data['agent_num'], 2).to(device)
+    data['heading'] = None # torch.zeros(data['agent_num']).to(device)
+    data['heading_vec'] = None # torch.zeros(data['agent_num'], 2).to(device)
     pre_vel = torch.zeros_like(pre_motion)
     # pre_vel[1:] = pre_motion[1:] - pre_motion[:-1]
-    data['pre_vel'] = pre_vel
+    data['pre_vel'] = None # pre_vel
     data['pre_motion_scene_norm'] = pre_motion
     data['agent_enc_shuffle'] = None
     
@@ -294,14 +379,35 @@ def prepare_batch(batch, device, augment=False):
     return data
 
 
-# Helper to rotate a tensor [..., 2]
-def rotate_tensor(t, c, s):
-    # t shape: [..., 2]
-    x = t[..., 0]
-    y = t[..., 1]
-    x_new = x * c - y * s
-    y_new = x * s + y * c
-    return torch.stack([x_new, y_new], dim=-1)
+def rotate_scene(scene, angle):
+    """
+    Do Random Rotation Augmentation
+    """
+    # rot mtx
+    c, s = np.cos(angle), np.sin(angle)
+    R = np.array([[c, -s], [s, c]]) # [2, 2]
+
+    motion_keys = ['pre_motion_3D', 'fut_motion_3D'] 
+    for key in motion_keys:
+        if key in scene and scene[key] is not None:
+            new_motion_list = []
+            for agent_motion in scene[key]:
+                agent_motion_arr = np.asarray(agent_motion) 
+                rotated_motion = agent_motion_arr @ R.T
+                
+                new_motion_list.append(rotated_motion)
+            scene[key] = new_motion_list
+    return scene
+
+
+# # Helper to rotate a tensor [..., 2]
+# def rotate_tensor(t, c, s):
+#     # t shape: [..., 2]
+#     x = t[..., 0]
+#     y = t[..., 1]
+#     x_new = x * c - y * s
+#     y_new = x * s + y * c
+#     return torch.stack([x_new, y_new], dim=-1)
 
 
 def main(args):
@@ -327,6 +433,23 @@ def main(args):
     device = get_device(args)
     args.device = device
     logger.info(f'Using device: {device}')
+    
+    # Verify GPU is working if CUDA is selected
+    if device.type == 'cuda':
+        logger.info(f'CUDA Device: {torch.cuda.get_device_name(device.index)}')
+        logger.info(f'CUDA Available: {torch.cuda.is_available()}')
+        logger.info(f'CUDA Device Count: {torch.cuda.device_count()}')
+        # Test GPU with a simple operation
+        try:
+            test_tensor = torch.zeros(1).to(device)
+            logger.info(f'GPU test successful: {test_tensor.device}')
+        except Exception as e:
+            logger.error(f'GPU test failed: {e}')
+            logger.warning('Falling back to CPU')
+            device = torch.device('cpu')
+            args.device = device
+    else:
+        logger.info('Using CPU (CUDA not available or use_gpu=0)')
 
     # --- Initialize Models ---
     args.context_encoder = {
@@ -367,6 +490,10 @@ def main(args):
     # --- Initialize Learning Rate Schedulers ---
     scheduler_g = create_scheduler(optimizer_g, args.scheduler_type, args.num_epochs, args)
     scheduler_d = create_scheduler(optimizer_d, args.scheduler_type, args.num_epochs, args)
+
+    # scaler = torch.amp.GradScaler(args.device)
+    scaler = torch.cuda.amp.GradScaler(enabled=False)
+    # scaler = torch.cuda.amp.GradScaler(enabled=(args.device.type == 'cuda'))
     
     if scheduler_g is not None:
         logger.info(f'Using scheduler: {args.scheduler_type} (applied to both G and D)')
@@ -387,7 +514,8 @@ def main(args):
         'd_state': None,
         'd_optim_state': None,
         'd_scheduler_state': None,
-        'best_ade': float('inf'),
+        'best_ade': float('inf'),  # Keep for backward compatibility
+        'best_ade_fde': float('inf'),  # ADE + FDE for best model selection
     }
 
     # --- Restore Checkpoint ---
@@ -416,13 +544,25 @@ def main(args):
         
         t = checkpoint['counters']['t'] if checkpoint['counters']['t'] is not None else 0
         epoch = checkpoint['counters']['epoch'] if checkpoint['counters']['epoch'] is not None else 0
-        best_ade = checkpoint.get('best_ade', float('inf'))
+        best_ade = checkpoint.get('best_ade', float('inf'))  # Keep for backward compatibility
+        best_ade_fde = checkpoint.get('best_ade_fde', float('inf'))
     else:
         logger.info('Starting new training')
         t = 0
         epoch = 0
-        best_ade = float('inf')
+        best_ade = float('inf') # Keep for backward compatibility
+        best_ade_fde = float('inf')
     
+    if args.resume_warmup_from and os.path.isfile(args.resume_warmup_from):
+        logger.info(f"Loading pre-trained warm-up model from: {args.resume_warmup_from}")
+        warm_checkpoint = torch.load(args.resume_warmup_from, map_location='cpu', weights_only=False)
+    
+        generator.load_state_dict(warm_checkpoint['g_state'])
+        discriminator.load_state_dict(warm_checkpoint['d_state'])
+        del warm_checkpoint
+    
+        args.warmup_epochs = 0
+
     # --- Initialize Data Generator ---
     logger.info("Initializing Data Generator...")
     train_gen = data_generator(args, logger, split='train', phase='training')
@@ -445,6 +585,9 @@ def main(args):
         epoch += 1
         train_gen.shuffle()
         logger.info(f'Starting epoch {epoch}')
+        is_warmup = epoch <= args.warmup_epochs
+        if is_warmup:
+            logger.info(f"WARMUP PHASE: Training Generator Only (Epoch {epoch}/{args.warmup_epochs})")
         
         # Initialize epoch accumulators for losses
         epoch_d_losses = defaultdict(list)
@@ -453,20 +596,23 @@ def main(args):
         
         for itr in range(iterations_per_epoch):
             # 1. Fetch & Collate
-            raw_batch = fetch_and_collate_batch(train_gen, args.batch_size)
-            
+            # raw_batch = fetch_and_collate_batch(train_gen, args.batch_size)
+            raw_batch = fetch_and_collate_batch(train_gen, args.batch_size, augment=args.augment)
             if raw_batch is None: 
                 continue
                 
             # 2. Convert to Tensors
-            batch = prepare_batch(raw_batch, device, augment=args.augment)
+            batch = prepare_batch(raw_batch, device)
             
             # 3. Optimization
-            for _ in range(args.d_steps):
-                losses_d = discriminator_step(args, batch, generator, discriminator, gan_d_loss, optimizer_d, device)
+            if not is_warmup:
+                for _ in range(args.d_steps):
+                    losses_d = discriminator_step(args, batch, generator, discriminator, gan_d_loss, optimizer_d, scaler, device)
+            else:
+                losses_d = {'D_loss': 0.0}
             
             for _ in range(args.g_steps):
-                losses_g = generator_step(args, batch, generator, discriminator, gan_g_loss, optimizer_g, device)
+                losses_g = generator_step(args, batch, generator, discriminator, gan_g_loss, optimizer_g, scaler, device, is_warmup=is_warmup)
             
             t += 1
             batch_count += 1
@@ -490,14 +636,24 @@ def main(args):
             if t >= num_iterations:
                 break
         
-        # --- SAVE EPOCH AVERAGE LOSSES TO HISTORY ---
+        # --- SAVE EPOCH AVERAGE, MIN, MAX LOSSES TO HISTORY ---
         if batch_count > 0:
             for k in epoch_d_losses:
-                avg_loss = np.mean(epoch_d_losses[k])
+                loss_values = epoch_d_losses[k]
+                avg_loss = np.mean(loss_values)
+                min_loss = np.min(loss_values)
+                max_loss = np.max(loss_values)
                 checkpoint['D_losses'][k].append(avg_loss)
+                checkpoint['D_losses'][f'{k}_min'].append(min_loss)
+                checkpoint['D_losses'][f'{k}_max'].append(max_loss)
             for k in epoch_g_losses:
-                avg_loss = np.mean(epoch_g_losses[k])
+                loss_values = epoch_g_losses[k]
+                avg_loss = np.mean(loss_values)
+                min_loss = np.min(loss_values)
+                max_loss = np.max(loss_values)
                 checkpoint['G_losses'][k].append(avg_loss)
+                checkpoint['G_losses'][f'{k}_min'].append(min_loss)
+                checkpoint['G_losses'][f'{k}_max'].append(max_loss)
             checkpoint['losses_ts'].append(epoch)  # Use epoch number instead of iteration
             
             # Log epoch summary
@@ -513,7 +669,8 @@ def main(args):
             logger.info(log_str)
 
         logger.info('Checking validation...')
-        val_metrics = check_accuracy(args, val_gen, generator, limit=True)
+        # Use k=1 for fast validation during training (can be increased for more accurate metrics)
+        val_metrics = check_accuracy(args, val_gen, generator, limit=True, k=1, augment=False)
         logger.info(f'[Val] ADE: {val_metrics["ade"]:.4f} | FDE: {val_metrics["fde"]:.4f}')
         
         # --- SAVE VAL METRICS TO HISTORY ---
@@ -560,169 +717,297 @@ def main(args):
         latest_path = os.path.join(args.output_dir, f'{args.checkpoint_name}_latest.pt')
         torch.save(checkpoint, latest_path)
         
-        # Save Best
-        if val_metrics['ade'] < checkpoint['best_ade']:
-            checkpoint['best_ade'] = val_metrics['ade']
+        # Save Best (based on ADE + FDE)
+        current_ade_fde = val_metrics['ade'] + val_metrics['fde']
+        if current_ade_fde < checkpoint['best_ade_fde']:
+            checkpoint['best_ade_fde'] = current_ade_fde
+            checkpoint['best_ade'] = val_metrics['ade']  # Keep for backward compatibility
             best_path = os.path.join(args.output_dir, f'{args.checkpoint_name}_best.pt')
             torch.save(checkpoint, best_path)
-            logger.info(f'New Best Model (ADE {checkpoint["best_ade"]:.4f}) saved: {best_path}')
+            logger.info(f'New Best Model (ADE+FDE: {current_ade_fde:.4f}, ADE: {val_metrics["ade"]:.4f}, FDE: {val_metrics["fde"]:.4f}) saved: {best_path}')
 
 
-def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimizer_d, device):
+def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimizer_d, scaler, device):
     losses = {}
-    loss = torch.zeros(1, device=device)
-
-    # 1. Generate Fake (Detach to stop gradients to Generator)
-    # Note: Generator forward returns (pred_fake, data_dict)
-    with torch.no_grad():
-        pred_fake_abs, _ = generator(batch) 
-        # pred_fake_abs = pred_fake_abs.detach()
-        pred_fake_abs = pred_fake_abs.permute(1, 0, 2).detach()
-
-    # 2. Get Real Data (Absolute)
-    pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
-    
-    # 3. Discriminator Forward
-    # Inputs are [Time, Agents, 2]
-    scores_fake = discriminator(batch['pre_motion'], pred_fake_abs, batch['agent_mask'], batch['agent_num'])
-    scores_real = discriminator(batch['pre_motion'], pred_real_abs, batch['agent_mask'], batch['agent_num'])
-
-    # 4. Compute Loss
-    data_loss = d_loss_fn(scores_real, scores_fake)
-    loss += data_loss
-    losses['D_loss'] = loss.item()
-
     optimizer_d.zero_grad()
-    loss.backward()
-    if args.clipping_threshold_d > 0:
-        nn.utils.clip_grad_norm_(discriminator.parameters(), args.clipping_threshold_d)
-    optimizer_d.step()
 
-    return losses
+    # 1. Forward & Loss
+    # with torch.amp.autocast('cuda'):
+    # with torch.cuda.amp.autocast(enabled=(args.device.type == 'cuda')):
+    with torch.cuda.amp.autocast(enabled=False):
+        # Generate Fake (Detach to stop gradients to Generator)
+        with torch.no_grad():
+            pred_fake_abs, _ = generator(batch) 
+            pred_fake_abs = pred_fake_abs.permute(1, 0, 2).detach()
 
+        # Get Real Data
+        pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
+        
+        # Discriminator Forward
+        scores_fake = discriminator(batch['pre_motion'], pred_fake_abs, batch['agent_mask'], batch['agent_num'])
+        scores_real = discriminator(batch['pre_motion'], pred_real_abs, batch['agent_mask'], batch['agent_num'])
 
-def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, device):
-    losses = {}
-    loss = torch.zeros(1, device=device)
+        # Compute Loss
+        loss = d_loss_fn(scores_real, scores_fake)
+        losses['D_loss'] = loss.item()
+
+    # 3. Backward with Scaler
+    scaler.scale(loss).backward()
     
-    # 1. Forward Generator
-    # If CVAE is enabled, this encodes future -> z. Else samples random z.
-    pred_fake_abs, data_dict = generator(batch)
-    pred_real_abs = batch['fut_motion']
-    pred_fake_abs = pred_fake_abs.permute(1, 0, 2)
-
-    # 2. Reconstruction Loss (L2 on Absolute Coords)
-    loss_mask = batch.get('fut_mask', None)
-    if loss_mask is not None:
-        loss_mask = loss_mask.transpose(0, 1)
-            
-    # l2 = l2_loss(pred_fake_abs, pred_real_abs, loss_mask, mode='raw')
-    l2 = l2_loss(pred_fake_abs, pred_real_abs, loss_mask, mode='average')
-    loss += args.l2_loss_weight * l2
-    losses['G_l2'] = l2.item()
-
-    # 3. KL Divergence (If CVAE mode is ON)
-    if args.use_cvae:
-        q_dist = data_dict['q_z_dist']
-        p_dist = data_dict['p_z_dist_infer'] # Prior (usually N(0,1))
-        # Compute KL(Posterior || Prior)
-        kl = torch.distributions.kl.kl_divergence(q_dist, p_dist).sum(dim=-1).mean()
-        loss += args.kl_weight * kl
-        losses['G_kl'] = kl.item()
-
-    # 4. Adversarial Loss
-    scores_fake = discriminator(batch['pre_motion'], pred_fake_abs, batch['agent_mask'], batch['agent_num'])
-    loss_adv = g_loss_fn(scores_fake)
-    loss += loss_adv
-    losses['G_adv'] = loss_adv.item()
-
-    optimizer_g.zero_grad()
-    loss.backward()
-    if args.clipping_threshold_g > 0:
-        nn.utils.clip_grad_norm_(generator.parameters(), args.clipping_threshold_g)
-    optimizer_g.step()
+    # 4. Gradient Clipping (必須先 Unscale)
+    if args.clipping_threshold_d > 0:
+        scaler.unscale_(optimizer_d)
+        nn.utils.clip_grad_norm_(discriminator.parameters(), args.clipping_threshold_d)
+    
+    # 5. Optimizer Step with Scaler
+    scaler.step(optimizer_d)
+    scaler.update()
 
     return losses
 
 
-def check_accuracy(args, loader, generator, limit=False):
+# def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, device, is_warmup=False):
+#     losses = {}
+#     loss = torch.zeros(1, device=device)
+    
+#     # 1. Forward Generator
+#     pred_fake_abs, data_dict = generator(batch)
+#     pred_real_abs = batch['fut_motion']
+#     pred_fake_abs = pred_fake_abs.permute(1, 0, 2)
+
+#     # 2. Reconstruction Loss (L2 on Absolute Coords)
+#     loss_mask = batch.get('fut_mask', None)
+#     if loss_mask is not None:
+#         loss_mask = loss_mask.transpose(0, 1)
+            
+#     # l2 = l2_loss(pred_fake_abs, pred_real_abs, loss_mask, mode='raw')
+#     l2 = l2_loss(pred_fake_abs, pred_real_abs, loss_mask, mode='average')
+#     loss += args.l2_loss_weight * l2
+#     losses['G_l2'] = l2.item()
+
+#     # 3. KL Divergence (If CVAE mode is ON)
+#     if args.use_cvae:
+#         q_dist = data_dict['q_z_dist']
+#         p_dist = data_dict['p_z_dist_infer'] # Prior (usually N(0,1))
+#         # Compute KL(Posterior || Prior)
+#         kl = torch.distributions.kl.kl_divergence(q_dist, p_dist).sum(dim=-1).mean()
+#         loss += args.kl_weight * kl
+#         losses['G_kl'] = kl.item()
+
+#     # 4. Adversarial Loss
+#     if not is_warmup:
+#         scores_fake = discriminator(batch['pre_motion'], pred_fake_abs, batch['agent_mask'], batch['agent_num'])
+#         loss_adv = g_loss_fn(scores_fake)
+#         loss += loss_adv
+#         losses['G_adv'] = loss_adv.item()
+#     else:
+#         losses['G_adv'] = 0.0
+
+#     optimizer_g.zero_grad()
+#     loss.backward()
+#     if args.clipping_threshold_g > 0:
+#         nn.utils.clip_grad_norm_(generator.parameters(), args.clipping_threshold_g)
+#     optimizer_g.step()
+
+#     return losses
+
+
+def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, scaler, device, is_warmup=False):
     """
-    Evaluates the generator on the validation set.
-    Calculates ADE (Average Displacement Error), FDE (Final Displacement Error), and L2 loss.
+    Generator optimization step with optional Best-of-K (Variety Loss).
+    
+    Args:
+        k (int): Number of samples to generate for Variety Loss. 
+                 If k=1, standard GAN training.
+                 If k>1, minimizes L2 error of the best sample among k generations.
+    """
+    losses = {}
+    k = args.k
+    
+    optimizer_g.zero_grad()
+
+    # 開啟混合精度環境
+    # with torch.amp.autocast('cuda'):
+    # with torch.cuda.amp.autocast(enabled=(args.device.type == 'cuda')):
+    with torch.cuda.amp.autocast(enabled=False):
+        loss = torch.zeros(1, device=device)
+        
+        # Ground Truth
+        pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
+        loss_mask = batch.get('fut_mask', None)
+        if loss_mask is not None:
+            loss_mask = loss_mask.transpose(0, 1)
+
+        # --- Forward Generator ---
+        if k == 1:
+            pred_fake_abs, data_dict = generator(batch)
+            pred_fake_abs = pred_fake_abs.permute(1, 0, 2)
+            best_pred_fake = pred_fake_abs
+            best_data_dict = data_dict
+        else:
+            # Variety Loss Logic (Best-of-K)
+            preds_k = []
+            data_dicts_k = []
+            for _ in range(k):
+                p, d = generator(batch)
+                p = p.permute(1, 0, 2)
+                preds_k.append(p)
+                data_dicts_k.append(d)
+                
+            stack_preds = torch.stack(preds_k, dim=0) 
+            
+            # L2 Error Calculation
+            diff = stack_preds - pred_real_abs.unsqueeze(0)
+            dist_sq = diff.pow(2).sum(dim=-1)
+            
+            if loss_mask is not None:
+                mask_reshaped = loss_mask.transpose(0, 1).unsqueeze(0)
+                loss_dist = (dist_sq * mask_reshaped).sum(dim=1)
+            else:
+                loss_dist = dist_sq.sum(dim=1)
+                
+            min_vals, min_inds = loss_dist.min(dim=0)
+            
+            # Gather Best Trajectories
+            agents_num = stack_preds.shape[2]
+            best_pred_list = []
+            for i in range(agents_num):
+                best_idx = min_inds[i].item()
+                best_pred_list.append(stack_preds[best_idx, :, i, :])
+            best_pred_fake = torch.stack(best_pred_list, dim=1)
+            best_data_dict = data_dicts_k[0]
+
+        # --- Losses Calculation ---
+        l2 = l2_loss(best_pred_fake, pred_real_abs, loss_mask, mode='average')
+        loss = loss + args.l2_loss_weight * l2  # Use standard addition to avoid inplace errors
+        losses['G_l2'] = l2.item()
+
+        if args.use_cvae:
+            q_dist = best_data_dict['q_z_dist']
+            p_dist = best_data_dict['p_z_dist_infer']
+            kl = torch.distributions.kl.kl_divergence(q_dist, p_dist).sum(dim=-1).mean()
+            loss = loss + args.kl_weight * kl
+            losses['G_kl'] = kl.item()
+
+        if not is_warmup:
+            scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
+            loss_adv = g_loss_fn(scores_fake)
+            loss = loss + loss_adv
+            losses['G_adv'] = loss_adv.item()
+        else:
+            losses['G_adv'] = 0.0
+
+    # Backward & Step with Scaler
+    scaler.scale(loss).backward()
+    
+    if args.clipping_threshold_g > 0:
+        scaler.unscale_(optimizer_g)
+        nn.utils.clip_grad_norm_(generator.parameters(), args.clipping_threshold_g)
+        
+    scaler.step(optimizer_g)
+    scaler.update()
+
+    return losses
+
+
+def check_accuracy(args, loader, generator, limit=False, k=20, augment=False):
+    """
+    Evaluates the generator using Best-of-N strategy.
+    Returns ADE, FDE, and L2 (MSE) of the best trajectory.
+    
+    Args:
+        args: Arguments object
+        loader: Data loader
+        generator: Generator model
+        limit: Whether to limit number of samples
+        k: Number of samples for Best-of-K evaluation
+        augment: Whether to apply data augmentation (rotation)
     """
     metrics = {}
     ade_outer, fde_outer = [], []
-    l2_losses = []
+    l2_outer = [] 
     total_traj = 0
     
     generator.eval()
-    # loader.reset() # Ensure we start from the beginning
     
     with torch.no_grad():
         while not loader.is_epoch_end():
-            # 1. Fetch & Collate (Reuse the same batching logic)
-            raw_batch = fetch_and_collate_batch(loader, args.batch_size)
+            # 1. Fetch & Collate (with optional augmentation)
+            raw_batch = fetch_and_collate_batch(loader, args.batch_size, augment=augment)
             if raw_batch is None: continue
             
             # 2. Convert to Tensors
             batch = prepare_batch(raw_batch, get_device(args))
             
-            # 3. Forward Pass (Inference Mode)
-            # Use same z sampling as training or fixed z for determinism? 
-            # Usually random z for variety metrics, or mean z. 
-            # Here we follow standard AgentFormer evaluation (20 samples) or just 1 for quick check.
-            # Let's do 1 sample for fast validation during training.
-            pred_fake_abs, _ = generator(batch) 
-            pred_fake_abs = pred_fake_abs.permute(1, 0, 2)
-            pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
+            # 3. Multiple Sampling (Best-of-N)
+            pred_fake_list = []
+            for _ in range(k):
+                # 假設 generator 輸出是 [Agents, Time, 2]
+                pred_fake_abs, _ = generator(batch) 
+                pred_fake_list.append(pred_fake_abs)
             
-            # 4. Calculate Metrics (ADE / FDE)
-            diff = pred_fake_abs - pred_real_abs
-            dist = torch.norm(diff, dim=-1) # [12, N]
+            # [K, Agents, Time, 2]
+            pred_fake_k = torch.stack(pred_fake_list, dim=0) 
             
-            ade = dist.mean(dim=0) # Mean over time -> [N]
-            fde = dist[-1]         # Last timestep -> [N]
+            # 處理 Ground Truth: [Time, Agents, 2] -> [Agents, Time, 2] -> [K, Agents, Time, 2]
+            pred_real_abs = batch['fut_motion'].permute(1, 0, 2)
+            pred_real_k = pred_real_abs.unsqueeze(0).expand(k, -1, -1, -1)
             
-            # Filter valid (if using masks)
+            # 4. Calculate Difference
+            diff = pred_fake_k - pred_real_k
+            
+            # dist shape: [K, Agents, Time] (因為 dim=-1 把座標 (x,y) 算掉了)
+            dist = torch.norm(diff, dim=-1) 
+            dist_sq = diff.pow(2).sum(dim=-1)
+            
+            # Handling Valid Mask
             if 'fut_mask' in batch:
-                # Mask is already [Time, Agents] from prepare_batch
-                valid_mask = batch['fut_mask'] > 0
+                # batch['fut_mask'] 原始通常是 [Time, Agents]
+                # 我們需要轉置成 [Agents, Time] 來配合 dist
+                valid_mask = batch['fut_mask'].transpose(0, 1) > 0 
+                valid_mask_k = valid_mask.unsqueeze(0) # [1, Agents, Time]
                 
-                # ADE: Mean over Time (masked)
-                # Sum error over time / Sum valid frames over time
-                ade = (dist * valid_mask).sum(dim=0) / (valid_mask.sum(dim=0) + 1e-6)
+                # --- ADE Calculation ---
+                # 現在 Time 是 dim=2，所以我們要對 dim=2 求和
+                # [K, Agents, Time] -> sum(dim=2) -> [K, Agents]
+                ade_k = (dist * valid_mask_k).sum(dim=2) / (valid_mask_k.sum(dim=2) + 1e-6)
                 
-                # FDE: Last Valid Frame Error
-                # We assume the last frame is the target frame.
-                fde = dist[-1] * valid_mask[-1]
+                # --- FDE Calculation ---
+                # 取最後一個時間點 (Time is dim 2, so index -1 at axis 2)
+                fde_k = dist[:, :, -1] * valid_mask_k[:, :, -1]
+                
+                # --- L2 (MSE) Calculation ---
+                l2_k = (dist_sq * valid_mask_k).sum(dim=2) / (valid_mask_k.sum(dim=2) + 1e-6)
+                
             else:
-                ade = dist.mean(dim=0)
-                fde = dist[-1]
+                # 如果沒有 Mask，直接對 Time (dim=2) 取平均
+                ade_k = dist.mean(dim=2) # [K, Agents]
+                fde_k = dist[:, :, -1]   # [K, Agents]
+                l2_k = dist_sq.mean(dim=2) # [K, Agents]
             
-            # 5. Calculate L2 Loss (same as in generator_step)
-            loss_mask = batch.get('fut_mask', None)
-            if loss_mask is not None:
-                loss_mask = loss_mask.transpose(0, 1)
-            l2 = l2_loss(pred_fake_abs, pred_real_abs, loss_mask, mode='average')
-            l2_losses.append(l2.item())
+            # 5. Best-of-N Selection (保持不變，因為 input 已經是 [K, Agents])
+            best_ade, best_idx = ade_k.min(dim=0) # [Agents]
+            best_fde, _ = fde_k.min(dim=0)        # [Agents]
+            best_l2, _ = l2_k.min(dim=0)          # [Agents]
             
-            ade_outer.append(ade)
-            fde_outer.append(fde)
+            ade_outer.append(best_ade)
+            fde_outer.append(best_fde)
+            l2_outer.append(best_l2)
+            
             total_traj += batch['agent_num']
             
             if limit and total_traj >= args.num_samples_check:
                 break
 
-    # Aggregate results
     ade_all = torch.cat(ade_outer).mean().item()
     fde_all = torch.cat(fde_outer).mean().item()
-    l2_all = np.mean(l2_losses) if l2_losses else 0.0
+    l2_all = torch.cat(l2_outer).mean().item()
     
     metrics['ade'] = ade_all
     metrics['fde'] = fde_all
     metrics['l2'] = l2_all
     
-    generator.train() # Switch back to train mode
+    generator.train()
     return metrics
 
 
@@ -790,6 +1075,18 @@ if __name__ == '__main__':
         for key, value in cfg_dict.items():
             # Only set if the key exists in args to avoid arbitrary injection
             if hasattr(args, key):
+                # Convert boolean/string values to appropriate types for certain arguments
+                if key == 'use_gpu':
+                    # Ensure use_gpu is an integer (0 or 1)
+                    if isinstance(value, bool):
+                        value = 1 if value else 0
+                    elif isinstance(value, str):
+                        value = int(value)
+                    else:
+                        value = int(value)
+                elif key == 'gpu_num':
+                    # Ensure gpu_num is a string (for device selection)
+                    value = str(value)
                 setattr(args, key, value)
             else:
                 print(f"Warning: Key '{key}' in YAML not found in argparse definitions.")

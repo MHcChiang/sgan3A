@@ -8,21 +8,24 @@ min_past_frames: 8
 min_future_frames: 12
 frame_skip: 1           # Use every frame (if data is already 2.5Hz)
 phase: 'training'
-augment: 0
+augment: 1
 
 # --- Optimization ---
 # Paper uses "Adam optimizer" [cite: 287]
-batch_size: 1           # Standard for these transformers
-num_epochs: 100         # "100 epochs on ETH/UCY" [cite: 287]
+batch_size: 8           # Standard for these transformers
+num_epochs: 50           # "100 epochs on ETH/UCY" [cite: 287]
 g_learning_rate: 0.0001 # "initial learning rate of 10^-4" [cite: 288]
 d_learning_rate: 0.0001
 g_steps: 1
 d_steps: 1              # Standard GAN practice (train D more)
-clipping_threshold_g: 1.5
-clipping_threshold_d: 0.1
+clipping_threshold_g: 1.0
+clipping_threshold_d: 1.0
+k: 5
+warmup_epochs: 5
+resume_warmup_from: 'warmed.pt'
 
 # --- Learning Rate Scheduler ---
-scheduler_type: 'none'        # Options: 'none', 'step', 'exponential', 'plateau', 'cosine'
+scheduler_type: 'exponential'        # Options: 'none', 'step', 'exponential', 'plateau', 'cosine'
 scheduler_step_size: null     # Period for StepLR (epochs). If null, uses 30% of total epochs
 scheduler_gamma: null         # Decay factor. If null, uses 0.1 for StepLR, 0.95 for Exponential
 scheduler_min_lr: 0           # Minimum LR for CosineAnnealingLR
@@ -48,7 +51,7 @@ tf_nhead: 8
 tf_ff_dim: 512
 
 # "0.1 dropout rate" [cite: 279]
-tf_dropout: 0.1
+tf_dropout: 0.15
 
 pos_concat: true        # Required for time encoder design
 
@@ -59,13 +62,13 @@ z_type: 'gaussian'
 # --- CVAE Control ---
 use_cvae: 0             
 kl_weight: 1.0          # "coefficient beta ... equals 1" [cite: 281]
-l2_loss_weight: 0.1
+l2_loss_weight: 2.0 
 
 # --- Output ---
-output_dir: './checkpoints/1201_eth_org_fc'
-print_every: 100
+output_dir: './checkpoints/1206_Aug_b8'
+print_every: 50
 checkpoint_every: 1000
-checkpoint_name: '1201_eth_org_fc'
+checkpoint_name: '1206_Aug_b8'
 restore_from_checkpoint: 0
 num_samples_check: 500
 use_gpu: 1

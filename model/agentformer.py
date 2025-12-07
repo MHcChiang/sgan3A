@@ -401,7 +401,7 @@ class FutureDecoder(nn.Module):
         context = data['context_enc'].repeat_interleave(sample_num, dim=1)       # 80 x 64
         pre_motion = data['pre_motion'].repeat_interleave(sample_num, dim=1)             # 10 x 80 x 2
         pre_vel = data['pre_vel'].repeat_interleave(sample_num, dim=1) if self.pred_type == 'vel' else None
-        pre_motion_scene_norm = data['pre_motion_scene_norm'].repeat_interleave(sample_num, dim=1)
+        pre_motion_scene_norm = data['pre_motion_scene_norm'].repeat_interleave(sample_num, dim=1) if data['pre_motion_scene_norm'] is not None else None
         
         # p(z)
         prior_key = 'p_z_dist' + ('_infer' if mode == 'infer' else '')

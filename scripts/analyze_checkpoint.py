@@ -90,15 +90,6 @@ def load_checkpoint(checkpoint_path):
     # Check file extension
     if not checkpoint_path.endswith('.pt'):
         print(f"Warning: File does not have .pt extension: {checkpoint_path}")
-        if checkpoint_path.endswith('.textClipping'):
-            raise ValueError(
-                f"Error: This appears to be a macOS text clipping file, not a PyTorch checkpoint.\n"
-                f"Text clipping files are created when you drag and drop text on macOS.\n"
-                f"Please use the actual checkpoint file (e.g., checkpoint_transformer_with_model.pt)\n"
-                f"Expected checkpoint files:\n"
-                f"  - checkpoint_transformer_with_model.pt (contains model weights)\n"
-                f"  - checkpoint_transformer_no_model.pt (metrics only)"
-            )
     
     # Check file size (PyTorch checkpoints are usually > 1MB if they contain models)
     file_size = os.path.getsize(checkpoint_path)
@@ -146,6 +137,8 @@ def print_checkpoint_summary(checkpoint):
         print(f"  Current epoch: {counters.get('epoch', 'N/A')}")
     
     # Best models
+    if 'best_ade_fde' in checkpoint and checkpoint['best_ade_fde'] != float('inf'):
+        print(f"  Best ADE+FDE: {checkpoint['best_ade_fde']:.4f}")
     if 'best_ade' in checkpoint and checkpoint['best_ade'] != float('inf'):
         print(f"  Best ADE: {checkpoint['best_ade']:.4f}")
     
@@ -196,13 +189,12 @@ def print_checkpoint_summary(checkpoint):
 
 def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
     """
-    Plot training curves in a diagnostic 2x2 grid layout.
+    Plot training curves in a 1x3 horizontal layout.
     
     Layout:
-    - Top-Left: Validation Accuracy (ADE/FDE)
-    - Top-Right: Generator Losses (Adversarial, L2, KL if available)
-    - Bottom-Left: GAN Stability (Generator vs Discriminator adversarial losses)
-    - Bottom-Right: Training Losses Over Time
+    - Left: Validation Accuracy (ADE/FDE)
+    - Middle: Smoothed Adversarial Losses (G_adv and D_loss)
+    - Right: G L2 Loss (Training vs Validation)
     
     Args:
         checkpoint: Checkpoint dictionary
@@ -213,7 +205,7 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
         print("Cannot plot: matplotlib not available")
         return
     
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     fig.suptitle('Training Diagnostics Dashboard', fontsize=16, fontweight='bold')
     
     # Get timestamps
@@ -221,10 +213,10 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
     sample_ts = checkpoint.get('sample_ts', [])
     
     # ============================================================================
-    # Top-Left: Validation Accuracy (Meters)
+    # Left: Validation Accuracy (Meters)
     # Plot: val_ade, val_fde
     # ============================================================================
-    ax1 = axes[0, 0]
+    ax1 = axes[0]
     if 'metrics_val' in checkpoint and sample_ts:
         metrics_val = checkpoint['metrics_val']
         
@@ -246,10 +238,10 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
     ax1.grid(True, alpha=0.3)
     
     # ============================================================================
-    # Top-Right: Smoothed Adversarial Losses
+    # Middle: Smoothed Adversarial Losses
     # Plot: Smoothed G_adv and D_loss
     # ============================================================================
-    ax2 = axes[0, 1]
+    ax2 = axes[1]
     if 'G_losses' in checkpoint and 'D_losses' in checkpoint and losses_ts:
         g_losses = checkpoint['G_losses']
         d_losses = checkpoint['D_losses']
@@ -264,6 +256,13 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
             # Also plot raw data with lower opacity
             ax2.plot(losses_ts[:min_len], g_adv_data, 
                     linewidth=0.5, color='#2ca02c', alpha=0.2)
+            
+            # Plot min/max range if available
+            if 'G_adv_min' in g_losses and 'G_adv_max' in g_losses:
+                g_adv_min = g_losses['G_adv_min'][:min_len]
+                g_adv_max = g_losses['G_adv_max'][:min_len]
+                ax2.fill_between(losses_ts[:min_len], g_adv_min, g_adv_max, 
+                               color='#2ca02c', alpha=0.15, label='G Adv range')
         
         # Plot smoothed D loss
         if 'D_loss' in d_losses and d_losses['D_loss']:
@@ -275,6 +274,13 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
             # Also plot raw data with lower opacity
             ax2.plot(losses_ts[:min_len], d_loss_data, 
                     linewidth=0.5, color='#ff7f0e', alpha=0.2)
+            
+            # Plot min/max range if available
+            if 'D_loss_min' in d_losses and 'D_loss_max' in d_losses:
+                d_loss_min = d_losses['D_loss_min'][:min_len]
+                d_loss_max = d_losses['D_loss_max'][:min_len]
+                ax2.fill_between(losses_ts[:min_len], d_loss_min, d_loss_max, 
+                               color='#ff7f0e', alpha=0.15, label='D Loss range')
     
     # ax2.set_xlabel('Epoch', fontsize=11)
     ax2.set_xlabel('iteration', fontsize=11)
@@ -285,39 +291,10 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
     ax2.set_ylim(bottom=0)
     
     # ============================================================================
-    # Bottom-Left: GAN Stability (Adversarial Only)
-    # Plot: G_adv vs D_loss
-    # ============================================================================
-    ax3 = axes[1, 0]
-    if 'G_losses' in checkpoint and 'D_losses' in checkpoint and losses_ts:
-        g_losses = checkpoint['G_losses']
-        d_losses = checkpoint['D_losses']
-        
-        # Generator adversarial loss
-        if 'G_adv' in g_losses and g_losses['G_adv']:
-            min_len = min(len(g_losses['G_adv']), len(losses_ts))
-            ax3.plot(losses_ts[:min_len], g_losses['G_adv'][:min_len], 
-                    label='G Adversarial Loss', marker='o', markersize=3, linewidth=2, color='#2ca02c')
-        
-        # Discriminator loss
-        if 'D_loss' in d_losses and d_losses['D_loss']:
-            min_len = min(len(d_losses['D_loss']), len(losses_ts))
-            ax3.plot(losses_ts[:min_len], d_losses['D_loss'][:min_len], 
-                    label='D Loss', marker='s', markersize=3, linewidth=2, color='#ff7f0e')
-    
-    # ax3.set_xlabel('Epoch', fontsize=11)
-    ax3.set_xlabel('iteration', fontsize=11)
-    ax3.set_ylabel('Adversarial Loss', fontsize=11)
-    ax3.set_title('GAN Stability (Adversarial Only)', fontsize=12, fontweight='bold')
-    ax3.legend(fontsize=10)
-    ax3.grid(True, alpha=0.3)
-    ax3.set_ylim(bottom=0)
-    
-    # ============================================================================
-    # Bottom-Right: G L2 Loss (Training vs Validation)
+    # Right: G L2 Loss (Training vs Validation)
     # Plot: Training and Validation G L2 loss (raw and smoothed)
     # ============================================================================
-    ax4 = axes[1, 1]
+    ax3 = axes[2]
     has_data = False
     
     # Training G L2 loss
@@ -330,11 +307,18 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
             train_l2_smoothed = smooth_data(train_l2_data, window_size=smooth_window)
             
             # Plot smoothed training L2 loss
-            ax4.plot(losses_ts[:min_len], train_l2_smoothed, 
+            ax3.plot(losses_ts[:min_len], train_l2_smoothed, 
                     label='Train G L2 (smoothed)', linewidth=2.5, color='#1f77b4', alpha=0.8)
             # Plot raw training L2 loss with lower opacity
-            ax4.plot(losses_ts[:min_len], train_l2_data, 
+            ax3.plot(losses_ts[:min_len], train_l2_data, 
                     linewidth=0.5, color='#1f77b4', alpha=0.2)
+            
+            # # Plot min/max range if available
+            # if 'G_l2_min' in g_losses and 'G_l2_max' in g_losses:
+            #     train_l2_min = g_losses['G_l2_min'][:min_len]
+            #     train_l2_max = g_losses['G_l2_max'][:min_len]
+            #     ax3.fill_between(losses_ts[:min_len], train_l2_min, train_l2_max, 
+            #                    color='#1f77b4', alpha=0.15, label='Train L2 range')
             has_data = True
     
     # Validation G L2 loss
@@ -347,41 +331,46 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
             val_l2_smoothed = smooth_data(val_l2_data, window_size=smooth_window)
             
             # Plot smoothed validation L2 loss
-            ax4.plot(sample_ts[:min_len], val_l2_smoothed, 
+            ax3.plot(sample_ts[:min_len], val_l2_smoothed, 
                     label='Val G L2 (smoothed)', linewidth=2.5, color='#d62728', alpha=0.8, linestyle='--')
             # Plot raw validation L2 loss with lower opacity
-            ax4.plot(sample_ts[:min_len], val_l2_data, 
+            ax3.plot(sample_ts[:min_len], val_l2_data, 
                     linewidth=0.5, color='#d62728', alpha=0.2, linestyle='--')
             has_data = True
     
     if not has_data:
-        ax4.text(0.5, 0.5, 'No L2 loss data available', 
-                ha='center', va='center', transform=ax4.transAxes, fontsize=12)
+        ax3.text(0.5, 0.5, 'No L2 loss data available', 
+                ha='center', va='center', transform=ax3.transAxes, fontsize=12)
     
-    # ax4.set_xlabel('Epoch', fontsize=11)
-    ax4.set_xlabel('iteration', fontsize=11)
-    ax4.set_ylabel('L2 Loss', fontsize=11)
-    ax4.set_title('G L2 Loss (Training vs Validation)', fontsize=12, fontweight='bold')
-    ax4.legend(fontsize=10)
-    ax4.grid(True, alpha=0.3)
-    if has_data:
-        # Calculate y_max from available data
-        percentiles = []
-        if 'G_losses' in checkpoint and losses_ts and 'G_l2' in checkpoint['G_losses']:
-            train_l2_data = checkpoint['G_losses']['G_l2']
-            if len(train_l2_data) > 0:
-                percentiles.append(np.percentile(train_l2_data, 75))
-        if 'metrics_val' in checkpoint and sample_ts and 'l2' in checkpoint['metrics_val']:
-            val_l2_data = checkpoint['metrics_val']['l2']
-            if len(val_l2_data) > 0:
-                percentiles.append(np.percentile(val_l2_data, 75))
-        if percentiles:
-            y_max = np.max(percentiles)
-            ax4.set_ylim([0, y_max])
-        else:
-            ax4.set_ylim(bottom=0)
-    else:
-        ax4.set_ylim(bottom=0)
+    # ax3.set_xlabel('Epoch', fontsize=11)
+    ax3.set_xlabel('iteration', fontsize=11)
+    ax3.set_ylabel('L2 Loss', fontsize=11)
+    ax3.set_title('G L2 Loss (Training vs Validation)', fontsize=12, fontweight='bold')
+    ax3.legend(fontsize=10)
+    ax3.grid(True, alpha=0.3)
+    # if has_data:
+        # Calculate y_max from available data (including max values if available)
+        # max_values = []
+        # if 'G_losses' in checkpoint and losses_ts and 'G_l2' in checkpoint['G_losses']:
+        #     train_l2_data = checkpoint['G_losses']['G_l2']
+        #     if len(train_l2_data) > 0:
+        #         max_values.append(np.max(train_l2_data))
+        #         # Also check for G_l2_max if available
+        #         if 'G_l2_max' in checkpoint['G_losses']:
+        #             train_l2_max = checkpoint['G_losses']['G_l2_max']
+        #             if len(train_l2_max) > 0:
+        #                 max_values.append(np.max(train_l2_max))
+        # if 'metrics_val' in checkpoint and sample_ts and 'l2' in checkpoint['metrics_val']:
+        #     val_l2_data = checkpoint['metrics_val']['l2']
+        #     if len(val_l2_data) > 0:
+        #         max_values.append(np.max(val_l2_data))
+        # if max_values:
+        #     y_max = np.max(max_values) * 1.1  # Add 10% padding
+        #     ax4.set_ylim([0, y_max])
+    #     else:
+    #         ax4.set_ylim(bottom=0)
+    # else:
+    #     ax4.set_ylim(bottom=0)
     
     plt.tight_layout()
     
@@ -399,6 +388,7 @@ def export_to_json(checkpoint, output_path):
     export_data = {
         'counters': checkpoint.get('counters', {}),
         'best_ade': checkpoint.get('best_ade', float('inf')),
+        'best_ade_fde': checkpoint.get('best_ade_fde', float('inf')),
         'losses_ts': checkpoint.get('losses_ts', []),
         'sample_ts': checkpoint.get('sample_ts', []),
     }
@@ -522,8 +512,8 @@ def main():
     parser.add_argument(
         '--smooth-window',
         type=int,
-        default=5,
-        help='Window size for smoothing curves (default: 5)'
+        default=1,
+        help='Window size for smoothing curves (default: 1)'
     )
     
     args = parser.parse_args()

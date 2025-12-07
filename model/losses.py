@@ -1,5 +1,6 @@
 import torch
 import random
+from torch.nn.functional import binary_cross_entropy_with_logits
 
 
 def bce_loss(input, target):
@@ -16,9 +17,11 @@ def bce_loss(input, target):
     - A PyTorch Tensor containing the mean BCE loss over the minibatch of
       input data.
     """
-    neg_abs = -input.abs()
-    loss = input.clamp(min=0) - input * target + (1 + neg_abs.exp()).log()
-    return loss.mean()
+    # neg_abs = -input.abs()
+    # loss = input.clamp(min=0) - input * target + (1 + neg_abs.exp()).log()
+    # return loss.mean()
+    return binary_cross_entropy_with_logits(input, target)
+
 
 
 def gan_g_loss(scores_fake):
@@ -29,7 +32,7 @@ def gan_g_loss(scores_fake):
     Output:
     - loss: Tensor of shape (,) giving GAN generator loss
     """
-    y_fake = torch.ones_like(scores_fake) * random.uniform(0.7, 1.2)
+    y_fake = torch.ones_like(scores_fake) * random.uniform(0.7, 1.0) # 1.2
     return bce_loss(scores_fake, y_fake)
 
 
@@ -42,7 +45,7 @@ def gan_d_loss(scores_real, scores_fake):
     Output:
     - loss: Tensor of shape (,) giving GAN discriminator loss
     """
-    y_real = torch.ones_like(scores_real) * random.uniform(0.7, 1.2)
+    y_real = torch.ones_like(scores_real) * random.uniform(0.7, 1.0) #1.2
     y_fake = torch.zeros_like(scores_fake) * random.uniform(0, 0.3)
     loss_real = bce_loss(scores_real, y_real)
     loss_fake = bce_loss(scores_fake, y_fake)
