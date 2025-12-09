@@ -12,17 +12,17 @@ augment: 1
 
 # --- Optimization ---
 # Paper uses "Adam optimizer" [cite: 287]
-batch_size: 8           # Standard for these transformers
+batch_size: 8           # If augmented, should >=2
 num_epochs: 50           # "100 epochs on ETH/UCY" [cite: 287]
 g_learning_rate: 0.0001 # "initial learning rate of 10^-4" [cite: 288]
 d_learning_rate: 0.0001
-g_steps: 1
+g_steps: 2
 d_steps: 1              # Standard GAN practice (train D more)
 clipping_threshold_g: 1.0
 clipping_threshold_d: 1.0
-k: 5
-warmup_epochs: 5
-resume_warmup_from: 'warmed.pt'
+k: 10
+warmup_epochs: 1
+resume_warmup_from: None #'warmed.pt'
 
 # --- Learning Rate Scheduler ---
 scheduler_type: 'exponential'        # Options: 'none', 'step', 'exponential', 'plateau', 'cosine'
@@ -62,14 +62,14 @@ z_type: 'gaussian'
 # --- CVAE Control ---
 use_cvae: 0             
 kl_weight: 1.0          # "coefficient beta ... equals 1" [cite: 281]
-l2_loss_weight: 2.0 
+l2_loss_weight: 1.0 
 
 # --- Output ---
-output_dir: './checkpoints/1206_Aug_b8'
+output_dir: './checkpoints/1207_Aug_b4_WR1_K10'
 print_every: 50
 checkpoint_every: 1000
-checkpoint_name: '1206_Aug_b8'
-restore_from_checkpoint: 0
+checkpoint_name: '1207_Aug_b4_WR1_K10'
+restore_from_checkpoint: 1
 num_samples_check: 500
 use_gpu: 1
 gpu_num: "0"

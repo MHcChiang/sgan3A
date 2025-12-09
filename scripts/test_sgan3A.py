@@ -56,7 +56,8 @@ def draw_trajectory(args, loader, generator):
     """
     logger.info("Drawing trajectories...")
     generator.eval()
-    loader.shuffle()
+    if args.shuffle:
+        loader.shuffle()
     if hasattr(loader, 'reset'): loader.reset()
     else: loader.index = 0
     
@@ -237,37 +238,14 @@ if __name__ == '__main__':
     parser.add_argument('--sample_k', default=20, type=int, help='Number of samples for Best-of-K evaluation')
     parser.add_argument('--batch_size', default=1, type=int, help='Batch size for evaluation')
     parser.add_argument('--num_samples_check', default=None, type=int, help='Limit number of samples to evaluate (None = all)')
+    parser.add_argument('--shuffle', default=False, action='store_true', help='Shuffle data (default: False)')
     
-    # --- AgentFormer Params (Defaults will be overwritten by config_saved.yaml) ---
-    parser.add_argument('--traj_scale', default=1, type=int)
-    parser.add_argument('--motion_dim', default=2, type=int)
-    parser.add_argument('--forecast_dim', default=2, type=int)
-    parser.add_argument('--tf_model_dim', default=256, type=int)
-    parser.add_argument('--tf_nhead', default=8, type=int)
-    parser.add_argument('--tf_ff_dim', default=512, type=int)
-    parser.add_argument('--tf_dropout', default=0.1, type=float)
-    parser.add_argument('--pos_concat', action='store_true', default=True)
-    parser.add_argument('--nz', default=32, type=int)
-    parser.add_argument('--z_type', default='gaussian', type=str)
-    
-    parser.add_argument('--enc_layers', default=2, type=int)
-    parser.add_argument('--dec_layers', default=2, type=int)
-    parser.add_argument('--input_type', default='pos', type=str)
-    parser.add_argument('--use_cvae', default=0, type=int)
-    parser.add_argument('--use_map', default=False, action='store_true')
-
-    # Misc
-    parser.add_argument('--past_frames', default=8, type=int)
-    parser.add_argument('--future_frames', default=12, type=int)
-    parser.add_argument('--min_past_frames', default=8, type=int)
-    parser.add_argument('--min_future_frames', default=12, type=int)
-    parser.add_argument('--frame_skip', default=1, type=int)
-    # parser.add_argument('--output_dir', default='./results/test_output')
-    parser.add_argument('--use_gpu', default=0, type=int)
+    # Note: AgentFormer architecture params and data params are loaded from config_saved.yaml
+    # Only keeping runtime/evaluation params here
+    parser.add_argument('--use_gpu', default=0, type=int, help='Use GPU (0=CPU, 1=GPU)')
     
     args = parser.parse_args()
 
-    # --- NEW: Logic to resolve paths from Folder ---
     model_dir = args.model_path
     args.output_dir = model_dir
     
@@ -290,17 +268,29 @@ if __name__ == '__main__':
     print(f"Target Checkpoint: {full_ckpt_path}")
 
     # --- Load Configuration ---
+    # Preserve output_dir and use_gpu before loading config (they may contain old values from training)
+    preserved_output_dir = args.output_dir
+    preserved_use_gpu = args.use_gpu  # Preserve command-line value (default is 0)
+    
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
             cfg_dict = yaml.safe_load(f)
         
-        # Overwrite args with saved config values
+        # Load all config values into args (including architecture params not in parser)
         # We assume saved config is the "truth" for model architecture
         for key, value in cfg_dict.items():
-            if hasattr(args, key):
-                setattr(args, key, value)
-    else:
-        print(f"Warning: Config file not found at {config_path}. Using default args.")
+            setattr(args, key, value)
+    
+    # Restore output_dir to the model directory (not the one from saved config)
+    args.output_dir = preserved_output_dir
+    
+    # Restore use_gpu to command-line value (default is 0)
+    # This prevents warnings when config has use_gpu=1 but CUDA is not available
+    # use_gpu is a runtime setting, not a model architecture param, so we respect command line
+    args.use_gpu = preserved_use_gpu
+    
+    if not os.path.exists(config_path):
+        print(f"Warning: Config file not found at {config_path}. Model may fail to load without proper config.")
 
     # Add .get() compatibility
     args.get = lambda key, default=None: getattr(args, key, default)

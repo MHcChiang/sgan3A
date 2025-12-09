@@ -193,8 +193,8 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
     
     Layout:
     - Left: Validation Accuracy (ADE/FDE)
-    - Middle: Smoothed Adversarial Losses (G_adv and D_loss)
-    - Right: G L2 Loss (Training vs Validation)
+    - Middle: G L2 Loss (Training vs Validation)
+    - Right: Smoothed Adversarial Losses (G_adv and D_loss)
     
     Args:
         checkpoint: Checkpoint dictionary
@@ -204,6 +204,9 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
     if not PLOTTING_AVAILABLE:
         print("Cannot plot: matplotlib not available")
         return
+    
+    # Set font to Times New Roman
+    plt.rcParams['font.family'] = 'Times New Roman'
     
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     fig.suptitle('Training Diagnostics Dashboard', fontsize=16, fontweight='bold')
@@ -230,71 +233,18 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
             ax1.plot(sample_ts[:min_len], metrics_val['fde'][:min_len], 
                     label='Val FDE', marker='^', markersize=5, linewidth=2, color='#ff7f0e')
     
-    # ax1.set_xlabel('Epoch', fontsize=11)
-    ax1.set_xlabel('iteration', fontsize=11)
-    ax1.set_ylabel('Error (meters)', fontsize=11)
-    ax1.set_title('Validation Accuracy', fontsize=12, fontweight='bold')
-    ax1.legend(fontsize=10)
+    # ax1.set_xlabel('Epoch', fontsize=14)
+    ax1.set_xlabel('epoch', fontsize=14)
+    ax1.set_ylabel('Error (meters)', fontsize=14)
+    ax1.set_title('Validation Accuracy', fontsize=14, fontweight='bold')
+    ax1.legend(fontsize=14)
     ax1.grid(True, alpha=0.3)
     
     # ============================================================================
-    # Middle: Smoothed Adversarial Losses
-    # Plot: Smoothed G_adv and D_loss
-    # ============================================================================
-    ax2 = axes[1]
-    if 'G_losses' in checkpoint and 'D_losses' in checkpoint and losses_ts:
-        g_losses = checkpoint['G_losses']
-        d_losses = checkpoint['D_losses']
-        
-        # Plot smoothed G adversarial loss
-        if 'G_adv' in g_losses and g_losses['G_adv']:
-            min_len = min(len(g_losses['G_adv']), len(losses_ts))
-            g_adv_data = g_losses['G_adv'][:min_len]
-            g_adv_smoothed = smooth_data(g_adv_data, window_size=smooth_window)
-            ax2.plot(losses_ts[:min_len], g_adv_smoothed, 
-                    label='G Adversarial (smoothed)', linewidth=2.5, color='#2ca02c', alpha=0.8)
-            # Also plot raw data with lower opacity
-            ax2.plot(losses_ts[:min_len], g_adv_data, 
-                    linewidth=0.5, color='#2ca02c', alpha=0.2)
-            
-            # Plot min/max range if available
-            if 'G_adv_min' in g_losses and 'G_adv_max' in g_losses:
-                g_adv_min = g_losses['G_adv_min'][:min_len]
-                g_adv_max = g_losses['G_adv_max'][:min_len]
-                ax2.fill_between(losses_ts[:min_len], g_adv_min, g_adv_max, 
-                               color='#2ca02c', alpha=0.15, label='G Adv range')
-        
-        # Plot smoothed D loss
-        if 'D_loss' in d_losses and d_losses['D_loss']:
-            min_len = min(len(d_losses['D_loss']), len(losses_ts))
-            d_loss_data = d_losses['D_loss'][:min_len]
-            d_loss_smoothed = smooth_data(d_loss_data, window_size=smooth_window)
-            ax2.plot(losses_ts[:min_len], d_loss_smoothed, 
-                    label='D Loss (smoothed)', linewidth=2.5, color='#ff7f0e', alpha=0.8)
-            # Also plot raw data with lower opacity
-            ax2.plot(losses_ts[:min_len], d_loss_data, 
-                    linewidth=0.5, color='#ff7f0e', alpha=0.2)
-            
-            # Plot min/max range if available
-            if 'D_loss_min' in d_losses and 'D_loss_max' in d_losses:
-                d_loss_min = d_losses['D_loss_min'][:min_len]
-                d_loss_max = d_losses['D_loss_max'][:min_len]
-                ax2.fill_between(losses_ts[:min_len], d_loss_min, d_loss_max, 
-                               color='#ff7f0e', alpha=0.15, label='D Loss range')
-    
-    # ax2.set_xlabel('Epoch', fontsize=11)
-    ax2.set_xlabel('iteration', fontsize=11)
-    ax2.set_ylabel('Adversarial Loss', fontsize=11)
-    ax2.set_title('Smoothed Adversarial Losses', fontsize=12, fontweight='bold')
-    ax2.legend(fontsize=10)
-    ax2.grid(True, alpha=0.3)
-    ax2.set_ylim(bottom=0)
-    
-    # ============================================================================
-    # Right: G L2 Loss (Training vs Validation)
+    # Middle: G L2 Loss (Training vs Validation)
     # Plot: Training and Validation G L2 loss (raw and smoothed)
     # ============================================================================
-    ax3 = axes[2]
+    ax2 = axes[1]
     has_data = False
     
     # Training G L2 loss
@@ -307,17 +257,18 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
             train_l2_smoothed = smooth_data(train_l2_data, window_size=smooth_window)
             
             # Plot smoothed training L2 loss
-            ax3.plot(losses_ts[:min_len], train_l2_smoothed, 
-                    label='Train G L2 (smoothed)', linewidth=2.5, color='#1f77b4', alpha=0.8)
+            train_l2_label = 'Train G L2' + (' (smoothed)' if smooth_window > 1 else '')
+            ax2.plot(losses_ts[:min_len], train_l2_smoothed, 
+                    label=train_l2_label, linewidth=2.5, color='#1f77b4', alpha=0.8)
             # Plot raw training L2 loss with lower opacity
-            ax3.plot(losses_ts[:min_len], train_l2_data, 
+            ax2.plot(losses_ts[:min_len], train_l2_data, 
                     linewidth=0.5, color='#1f77b4', alpha=0.2)
             
             # # Plot min/max range if available
             # if 'G_l2_min' in g_losses and 'G_l2_max' in g_losses:
             #     train_l2_min = g_losses['G_l2_min'][:min_len]
             #     train_l2_max = g_losses['G_l2_max'][:min_len]
-            #     ax3.fill_between(losses_ts[:min_len], train_l2_min, train_l2_max, 
+            #     ax2.fill_between(losses_ts[:min_len], train_l2_min, train_l2_max, 
             #                    color='#1f77b4', alpha=0.15, label='Train L2 range')
             has_data = True
     
@@ -331,23 +282,79 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
             val_l2_smoothed = smooth_data(val_l2_data, window_size=smooth_window)
             
             # Plot smoothed validation L2 loss
-            ax3.plot(sample_ts[:min_len], val_l2_smoothed, 
-                    label='Val G L2 (smoothed)', linewidth=2.5, color='#d62728', alpha=0.8, linestyle='--')
+            val_l2_label = 'Val G L2' + (' (smoothed)' if smooth_window > 1 else '')
+            ax2.plot(sample_ts[:min_len], val_l2_smoothed, 
+                    label=val_l2_label, linewidth=2.5, color='#d62728', alpha=0.8, linestyle='--')
             # Plot raw validation L2 loss with lower opacity
-            ax3.plot(sample_ts[:min_len], val_l2_data, 
+            ax2.plot(sample_ts[:min_len], val_l2_data, 
                     linewidth=0.5, color='#d62728', alpha=0.2, linestyle='--')
             has_data = True
     
     if not has_data:
-        ax3.text(0.5, 0.5, 'No L2 loss data available', 
-                ha='center', va='center', transform=ax3.transAxes, fontsize=12)
+        ax2.text(0.5, 0.5, 'No L2 loss data available', 
+                ha='center', va='center', transform=ax2.transAxes, fontsize=14)
     
-    # ax3.set_xlabel('Epoch', fontsize=11)
-    ax3.set_xlabel('iteration', fontsize=11)
-    ax3.set_ylabel('L2 Loss', fontsize=11)
-    ax3.set_title('G L2 Loss (Training vs Validation)', fontsize=12, fontweight='bold')
-    ax3.legend(fontsize=10)
+    # ax2.set_xlabel('Epoch', fontsize=14)
+    ax2.set_xlabel('epoch', fontsize=14)
+    ax2.set_ylabel('L2 Loss', fontsize=14)
+    ax2.set_title('G L2 Loss (Training vs Validation)', fontsize=14, fontweight='bold')
+    ax2.legend(fontsize=14)
+    ax2.grid(True, alpha=0.3)
+    
+    # ============================================================================
+    # Right: Smoothed Adversarial Losses
+    # Plot: Smoothed G_adv and D_loss
+    # ============================================================================
+    ax3 = axes[2]
+    if 'G_losses' in checkpoint and 'D_losses' in checkpoint and losses_ts:
+        g_losses = checkpoint['G_losses']
+        d_losses = checkpoint['D_losses']
+        
+        # Plot smoothed G adversarial loss
+        if 'G_adv' in g_losses and g_losses['G_adv']:
+            min_len = min(len(g_losses['G_adv']), len(losses_ts))
+            g_adv_data = g_losses['G_adv'][:min_len]
+            g_adv_smoothed = smooth_data(g_adv_data, window_size=smooth_window)
+            g_adv_label = 'G Adversarial' + (' (smoothed)' if smooth_window > 1 else '')
+            ax3.plot(losses_ts[:min_len], g_adv_smoothed, 
+                    label=g_adv_label, linewidth=2.5, color='#2ca02c', alpha=0.8)
+            # Also plot raw data with lower opacity
+            ax3.plot(losses_ts[:min_len], g_adv_data, 
+                    linewidth=0.5, color='#2ca02c', alpha=0.2)
+            
+            # Plot min/max range if available
+            if 'G_adv_min' in g_losses and 'G_adv_max' in g_losses:
+                g_adv_min = g_losses['G_adv_min'][:min_len]
+                g_adv_max = g_losses['G_adv_max'][:min_len]
+                ax3.fill_between(losses_ts[:min_len], g_adv_min, g_adv_max, 
+                               color='#2ca02c', alpha=0.15, label='G Adv range')
+        
+        # Plot smoothed D loss
+        if 'D_loss' in d_losses and d_losses['D_loss']:
+            min_len = min(len(d_losses['D_loss']), len(losses_ts))
+            d_loss_data = d_losses['D_loss'][:min_len]
+            d_loss_smoothed = smooth_data(d_loss_data, window_size=smooth_window)
+            d_loss_label = 'D Loss' + (' (smoothed)' if smooth_window > 1 else '')
+            ax3.plot(losses_ts[:min_len], d_loss_smoothed, 
+                    label=d_loss_label, linewidth=2.5, color='#ff7f0e', alpha=0.8)
+            # Also plot raw data with lower opacity
+            ax3.plot(losses_ts[:min_len], d_loss_data, 
+                    linewidth=0.5, color='#ff7f0e', alpha=0.2)
+            
+            # Plot min/max range if available
+            if 'D_loss_min' in d_losses and 'D_loss_max' in d_losses:
+                d_loss_min = d_losses['D_loss_min'][:min_len]
+                d_loss_max = d_losses['D_loss_max'][:min_len]
+                ax3.fill_between(losses_ts[:min_len], d_loss_min, d_loss_max, 
+                               color='#ff7f0e', alpha=0.15, label='D Loss range')
+    
+    # ax3.set_xlabel('Epoch', fontsize=14)
+    ax3.set_xlabel('epoch', fontsize=14)
+    ax3.set_ylabel('Adversarial Loss', fontsize=14)
+    ax3.set_title('Smoothed Adversarial Losses', fontsize=14, fontweight='bold')
+    ax3.legend(fontsize=14)
     ax3.grid(True, alpha=0.3)
+    ax3.set_ylim(bottom=0)
     # if has_data:
         # Calculate y_max from available data (including max values if available)
         # max_values = []

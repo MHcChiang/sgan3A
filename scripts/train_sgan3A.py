@@ -5,7 +5,7 @@ import os
 import sys
 import time
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, deque
 import yaml
 import copy
 
@@ -270,7 +270,7 @@ def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_lim
     num_to_fetch = batch_size // 2 if augment else batch_size
     if num_to_fetch < 1: num_to_fetch = 1
 
-    # 2. ferch
+    # 2. Fetch scenes with agent limit check
     while len(scene_samples) < num_to_fetch:
         if generator.is_epoch_end():
             break
@@ -314,6 +314,142 @@ def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_lim
     return collate_scenes(scene_samples, mask=len(scene_samples)>1)
 
 
+class SmartBatcher:
+    def __init__(self, generator, batch_size, augment=False, max_agents_limit=50):
+        self.generator = generator
+        self.augment = augment
+        self.buffer = deque()
+        
+        # Q1優化: 初始化時就處理好 Augmentation 的係數
+        if self.augment:
+            self.target_count = max(1, batch_size // 2)
+            self.effective_limit = max_agents_limit // 2
+        else:
+            self.target_count = batch_size
+            self.effective_limit = max_agents_limit
+
+        self.agent_level = int(0.75 * self.effective_limit)
+        self.generator_exhausted = False
+            
+    def reset(self):
+        """每個 Epoch 開始前呼叫"""
+        self.buffer.clear()
+        self.generator.shuffle()
+        self.generator_exhausted = False 
+        
+    def has_data(self):
+        """
+        判斷是否還有數據。
+        關鍵：這裡絕對不呼叫 generator.is_epoch_end()，只看 Buffer 和內部的 Flag。
+        """
+        if len(self.buffer) > 0:
+            return True
+        
+        return not self.generator_exhausted
+
+    def next_batch(self):
+        scene_samples = []
+        current_raw_agents = 0
+        aug_to_buffer = 0 # flag to push augmentation of large scene to buffer
+        
+        # 內部函數：嘗試加入場景
+        def try_add_scene(scene):
+            nonlocal current_raw_agents
+            n_agents = len(scene['pre_motion_3D'])
+            
+            if (current_raw_agents + n_agents) > self.effective_limit:
+                return False
+            scene_samples.append(scene)
+            current_raw_agents += n_agents
+            return True
+
+        # --- 階段 1: 優先消化 Buffer ---
+        while len(self.buffer) > 0 and len(scene_samples) < self.target_count:
+            next_scene = self.buffer[0]
+            # breakpoint()
+            if try_add_scene(next_scene):
+                self.buffer.popleft() # 成功加入，移出 Buffer
+            else: # case if scene is too large to fit in batch
+                if len(scene_samples) == 0: # still fetch if batch is empty
+                    scene_samples.append(self.buffer.popleft())
+                    current_raw_agents += len(scene_samples[-1]['pre_motion_3D'])
+                    # if not scene.get('is_augmented', False):
+                    #     aug_to_buffer = 1
+                # if batch is not empty, do not fetch this large scene
+                break
+
+        # --- 階段 2: 從 Generator 獲取新數據 ---
+        while len(scene_samples) < self.target_count and current_raw_agents < self.effective_limit:
+            # 如果已經達到 Agent 限制，就不再抓新的
+            # if current_raw_agents >= self.effective_limit:
+            #     break
+
+            # stop fetching if already have large scene, agent level is reached, or generator is exhausted
+            if current_raw_agents >= self.agent_level or self.generator_exhausted: 
+                break
+
+            # epoch end
+            if self.generator.is_epoch_end():
+                self.generator_exhausted = True # 標記起來，之後 has_data 就會回傳 False
+                break
+
+            # 獲取數據
+            scene = self.generator()
+            
+            if scene is None: continue
+            # if fail to fetch scene, push to buffer
+            if not try_add_scene(scene):
+                if len(scene_samples) == 0:
+                    scene_samples.append(scene)
+                    current_raw_agents += len(scene['pre_motion_3D'])
+                    break
+                self.buffer.append(scene)
+                
+                # break # 結束這一輪 Fetch
+        # breakpoint()
+        if len(scene_samples) == 0:
+            return None
+
+        # --- Augmentation ---
+        if self.augment:
+            new_augmented_samples = []
+            new_aug_agents_count = 0
+
+            for scene in scene_samples:
+                # 1. 檢查是否已經是增強過的場景 (避免無限循環)
+                if scene.get('is_augmented', False):
+                    continue
+
+                # 2. 產生增強版
+                aug_scene = copy.deepcopy(scene)
+                k = np.random.randint(0, 24) 
+                angle = k * (2 * np.pi / 24)
+                aug_scene = rotate_scene(aug_scene, angle)
+                aug_scene['is_augmented'] = True # 標記它！
+                
+                new_augmented_samples.append(aug_scene)
+                new_aug_agents_count += len(aug_scene['pre_motion_3D'])
+
+            # 3. 你的邏輯：算總帳
+            # 如果 (原本的 + 新增強的) > Limit，就把增強版存 Buffer
+            if (current_raw_agents + new_aug_agents_count) > self.effective_limit:
+                self.buffer.extend(new_augmented_samples)
+            else:
+                # 沒爆，就加入當前 Batch
+                scene_samples.extend(new_augmented_samples)
+
+        # debug
+        # if current_raw_agents > self.effective_limit:
+        #     print(f"num of scene_samples: {len(scene_samples)}")
+        #     for i, scene in enumerate(scene_samples):
+        #         print(f"scene{i}, # agents: {len(scene['pre_motion_3D'])}")
+        #     # for scene in augmented_samples:
+        #     #     print(f"augmented scene agents: {len(scene['pre_motion_3D'])}")
+        #     breakpoint()
+        # --- 階段 4: Collate ---
+        return collate_scenes(scene_samples, mask=len(scene_samples)>1)
+
+
 def prepare_batch(batch, device):
     """
     Converts list of numpy arrays from data_generator into Tensor dictionary.
@@ -329,31 +465,21 @@ def prepare_batch(batch, device):
     # Stack list -> [Time, Agents, 2]XX -> [Agents, Time, 2]
     pre_motion = torch.stack([to_tensor(m) for m in batch['pre_motion_3D']], dim=0).to(device)
     fut_motion = torch.stack([to_tensor(m) for m in batch['fut_motion_3D']], dim=0).to(device)
-    # print(f"load: {pre_motion.shape}")
-    # Tranpose (NEED?)
-    pre_motion = pre_motion.transpose(0, 1).contiguous() # [Batch, Time, 2]X 
-    fut_motion = fut_motion.transpose(0, 1).contiguous()
-    # print(f"transpose: {pre_motion.shape}")
 
-    # # --- DATA AUGMENTATION (Random Rotation) ---
-    # if augment:
-    #     # Generate random angle: 0 to 2*pi
-    #     theta = torch.rand(1).to(device) * 2 * np.pi
-    #     c, s = torch.cos(theta), torch.sin(theta)
-        
-    #     # Apply to Past and Future
-    #     pre_motion = rotate_tensor(pre_motion,c ,s)
-    #     fut_motion = rotate_tensor(fut_motion, c, s)
-        
-    #     # Note: If you use 'heading' (yaw), you must rotate that too
-    #     if 'heading' in batch and batch['heading'] is not None:
-    #          # This part might need adjustment depending on how 'heading' is stored
-    #          # Usually it is a list of floats (radians)
-    #          # batch['heading'] is a list, so we handle it later or ignore if not used
-    #          pass
+    # Tranpose 
+    pre_motion = pre_motion.transpose(0, 1).contiguous() # [Batch, Time, 2]X
+    fut_motion = fut_motion.transpose(0, 1).contiguous()
+    
+    # 1206 ADD: scene-centered coordinate system (Agentformer sec4-Implementation detail)
+    current_pos_t0 = pre_motion[-1]
+    scene_center = torch.mean(current_pos_t0, dim=0, keepdim=True) 
+    pre_motion = pre_motion - scene_center
+    fut_motion = fut_motion - scene_center
 
     data['pre_motion'] = pre_motion
     data['fut_motion'] = fut_motion
+    data['scene_center'] = scene_center
+    # data['agent_current_pos'] = current_pos_t0 - scene_center # to recover original position, shape: [Agents, 2]
     data['agent_num'] = pre_motion.shape[1]
     
     # ... (Rest of the function remains the same) ...
@@ -398,6 +524,17 @@ def rotate_scene(scene, angle):
                 new_motion_list.append(rotated_motion)
             scene[key] = new_motion_list
     return scene
+
+
+def relative_to_abs(rel_traj, start_pos):
+    # 1. 對時間軸做累加 (Cumulative Sum) -> 算出相對於 start_pos 的總位移
+    rel_traj = torch.cumsum(rel_traj, dim=0)
+    
+    # 2. 加上起始位置 (start_pos)
+    # start_pos 需要 unsqueeze 變成 [1, batch, 2] 才能做廣播加法
+    abs_traj = rel_traj + start_pos.unsqueeze(0)
+    
+    return abs_traj
 
 
 # # Helper to rotate a tensor [..., 2]
@@ -580,10 +717,14 @@ def main(args):
         'val_metrics': defaultdict(list)   # Stores ADE, FDE per check
     }
 
+    batcher = SmartBatcher(train_gen, args.batch_size, augment=args.augment, max_agents_limit=50)
+    logger.info(f"Used SmartBatcher to fetch batch, batch size: {args.batch_size}, agent limit: {batcher.effective_limit*2}")
     # Main training loop
-    while t < num_iterations:
+    while epoch < args.num_epochs:
         epoch += 1
-        train_gen.shuffle()
+        # train_gen.shuffle()
+        batcher.reset()
+
         logger.info(f'Starting epoch {epoch}')
         is_warmup = epoch <= args.warmup_epochs
         if is_warmup:
@@ -594,10 +735,11 @@ def main(args):
         epoch_g_losses = defaultdict(list)
         batch_count = 0
         
-        for itr in range(iterations_per_epoch):
-            # 1. Fetch & Collate
-            # raw_batch = fetch_and_collate_batch(train_gen, args.batch_size)
-            raw_batch = fetch_and_collate_batch(train_gen, args.batch_size, augment=args.augment)
+        
+        while batcher.has_data():
+        # for itr in range(iterations_per_epoch):
+        #     raw_batch = fetch_and_collate_batch(train_gen, args.batch_size, augment=args.augment)
+            raw_batch = batcher.next_batch()
             if raw_batch is None: 
                 continue
                 
@@ -679,18 +821,21 @@ def main(args):
         checkpoint['sample_ts'].append(epoch)  # Use epoch number instead of iteration
 
         # --- STEP LEARNING RATE SCHEDULERS ---
-        # Step ReduceLROnPlateau schedulers based on validation metric
-        if scheduler_g is not None:
-            if args.scheduler_type == 'plateau':
-                scheduler_g.step(val_metrics['ade'])
-            elif args.scheduler_type in ['step', 'exponential', 'cosine']:
-                scheduler_g.step()
-        
-        if scheduler_d is not None:
-            if args.scheduler_type == 'plateau':
-                scheduler_d.step(val_metrics['ade'])
-            elif args.scheduler_type in ['step', 'exponential', 'cosine']:
-                scheduler_d.step()
+        # Only step schedulers after at least one optimizer step has been performed
+        # This prevents the warning about calling scheduler.step() before optimizer.step()
+        if batch_count > 0:
+            # Step ReduceLROnPlateau schedulers based on validation metric
+            if scheduler_g is not None:
+                if args.scheduler_type == 'plateau':
+                    scheduler_g.step(val_metrics['ade'])
+                elif args.scheduler_type in ['step', 'exponential', 'cosine']:
+                    scheduler_g.step()
+            
+            if scheduler_d is not None:
+                if args.scheduler_type == 'plateau':
+                    scheduler_d.step(val_metrics['ade'])
+                elif args.scheduler_type in ['step', 'exponential', 'cosine']:
+                    scheduler_d.step()
         
         # Log current learning rates
         current_lr_g = optimizer_g.param_groups[0]['lr']
@@ -766,48 +911,100 @@ def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimiz
     return losses
 
 
-# def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, device, is_warmup=False):
-#     losses = {}
-#     loss = torch.zeros(1, device=device)
+# def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, scaler, device, is_warmup=False):
+#     """
+#     Generator optimization step with optional Best-of-K (Variety Loss).
     
-#     # 1. Forward Generator
-#     pred_fake_abs, data_dict = generator(batch)
-#     pred_real_abs = batch['fut_motion']
-#     pred_fake_abs = pred_fake_abs.permute(1, 0, 2)
-
-#     # 2. Reconstruction Loss (L2 on Absolute Coords)
-#     loss_mask = batch.get('fut_mask', None)
-#     if loss_mask is not None:
-#         loss_mask = loss_mask.transpose(0, 1)
-            
-#     # l2 = l2_loss(pred_fake_abs, pred_real_abs, loss_mask, mode='raw')
-#     l2 = l2_loss(pred_fake_abs, pred_real_abs, loss_mask, mode='average')
-#     loss += args.l2_loss_weight * l2
-#     losses['G_l2'] = l2.item()
-
-#     # 3. KL Divergence (If CVAE mode is ON)
-#     if args.use_cvae:
-#         q_dist = data_dict['q_z_dist']
-#         p_dist = data_dict['p_z_dist_infer'] # Prior (usually N(0,1))
-#         # Compute KL(Posterior || Prior)
-#         kl = torch.distributions.kl.kl_divergence(q_dist, p_dist).sum(dim=-1).mean()
-#         loss += args.kl_weight * kl
-#         losses['G_kl'] = kl.item()
-
-#     # 4. Adversarial Loss
-#     if not is_warmup:
-#         scores_fake = discriminator(batch['pre_motion'], pred_fake_abs, batch['agent_mask'], batch['agent_num'])
-#         loss_adv = g_loss_fn(scores_fake)
-#         loss += loss_adv
-#         losses['G_adv'] = loss_adv.item()
-#     else:
-#         losses['G_adv'] = 0.0
-
+#     Args:
+#         k (int): Number of samples to generate for Variety Loss. 
+#                  If k=1, standard GAN training.
+#                  If k>1, minimizes L2 error of the best sample among k generations.
+#     """
+#     losses = {}
+#     k = args.k
+    
 #     optimizer_g.zero_grad()
-#     loss.backward()
+
+#     # 開啟混合精度環境
+#     # with torch.amp.autocast('cuda'):
+#     # with torch.cuda.amp.autocast(enabled=(args.device.type == 'cuda')):
+#     with torch.cuda.amp.autocast(enabled=False):
+#         loss = torch.zeros(1, device=device)
+        
+#         # Ground Truth
+#         pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
+#         loss_mask = batch.get('fut_mask', None)
+#         if loss_mask is not None:
+#             loss_mask = loss_mask.transpose(0, 1)
+
+#         # --- Forward Generator ---
+#         if k == 1:
+#             pred_fake_abs, data_dict = generator(batch)
+#             pred_fake_abs = pred_fake_abs.permute(1, 0, 2)
+#             best_pred_fake = pred_fake_abs
+#             best_data_dict = data_dict
+#         else:
+#             # Variety Loss Logic (Best-of-K)
+#             preds_k = []
+#             data_dicts_k = []
+#             for _ in range(k):
+#                 p, d = generator(batch)
+#                 p = p.permute(1, 0, 2)
+#                 preds_k.append(p)
+#                 data_dicts_k.append(d)
+                
+#             stack_preds = torch.stack(preds_k, dim=0) 
+            
+#             # L2 Error Calculation
+#             diff = stack_preds - pred_real_abs.unsqueeze(0)
+#             dist_sq = diff.pow(2).sum(dim=-1)
+            
+#             if loss_mask is not None:
+#                 mask_reshaped = loss_mask.transpose(0, 1).unsqueeze(0)
+#                 loss_dist = (dist_sq * mask_reshaped).sum(dim=1)
+#             else:
+#                 loss_dist = dist_sq.sum(dim=1)
+                
+#             min_vals, min_inds = loss_dist.min(dim=0)
+            
+#             # Gather Best Trajectories
+#             agents_num = stack_preds.shape[2]
+#             best_pred_list = []
+#             for i in range(agents_num):
+#                 best_idx = min_inds[i].item()
+#                 best_pred_list.append(stack_preds[best_idx, :, i, :])
+#             best_pred_fake = torch.stack(best_pred_list, dim=1)
+#             best_data_dict = data_dicts_k[0]
+
+#         # --- Losses Calculation ---
+#         l2 = l2_loss(best_pred_fake, pred_real_abs, loss_mask, mode='average')
+#         loss = loss + args.l2_loss_weight * l2  # Use standard addition to avoid inplace errors
+#         losses['G_l2'] = l2.item()
+
+#         if args.use_cvae:
+#             q_dist = best_data_dict['q_z_dist']
+#             p_dist = best_data_dict['p_z_dist_infer']
+#             kl = torch.distributions.kl.kl_divergence(q_dist, p_dist).sum(dim=-1).mean()
+#             loss = loss + args.kl_weight * kl
+#             losses['G_kl'] = kl.item()
+
+#         if not is_warmup:
+#             scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
+#             loss_adv = g_loss_fn(scores_fake)
+#             loss = loss + loss_adv
+#             losses['G_adv'] = loss_adv.item()
+#         else:
+#             losses['G_adv'] = 0.0
+
+#     # Backward & Step with Scaler
+#     scaler.scale(loss).backward()
+    
 #     if args.clipping_threshold_g > 0:
+#         scaler.unscale_(optimizer_g)
 #         nn.utils.clip_grad_norm_(generator.parameters(), args.clipping_threshold_g)
-#     optimizer_g.step()
+        
+#     scaler.step(optimizer_g)
+#     scaler.update()
 
 #     return losses
 
@@ -826,70 +1023,84 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
     
     optimizer_g.zero_grad()
 
-    # 開啟混合精度環境
-    # with torch.amp.autocast('cuda'):
-    # with torch.cuda.amp.autocast(enabled=(args.device.type == 'cuda')):
     with torch.cuda.amp.autocast(enabled=False):
         loss = torch.zeros(1, device=device)
         
-        # Ground Truth
-        pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
+        # Ground Truth & Pre-processing
+        # 1. 將 GT 轉為 [Batch, Time, 2] 以便統一計算
+        pred_real_norm = batch['fut_motion'].permute(1, 0, 2) 
+        
+        # 2. 準備當前位置用於還原 (Residual Connection)
+        # [Batch, 2] -> [Batch, 1, 2] (方便廣播加到 Time 維度)
+        # agent_current_pos = batch['agent_current_pos'].unsqueeze(1) 
+        
         loss_mask = batch.get('fut_mask', None)
         if loss_mask is not None:
-            loss_mask = loss_mask.transpose(0, 1)
+            # [Time, agents] -> 
+            loss_mask = loss_mask.transpose(0, 1)   # [agents, Time]
+        else:
+            loss_dist = dist_sq.sum(dim=2)
 
         # --- Forward Generator ---
         if k == 1:
-            pred_fake_abs, data_dict = generator(batch)
-            pred_fake_abs = pred_fake_abs.permute(1, 0, 2)
-            best_pred_fake = pred_fake_abs
+            pred_fake_offset, data_dict = generator(batch) # Output: [agents, time, 2]
+            
+            # 還原座標: [Batch, 1, 2] + [Batch, Time, 2]
+            pred_fake_norm = pred_fake_offset  #+  agent_current_pos
+            
+            best_pred_fake = pred_fake_norm
             best_data_dict = data_dict
         else:
             # Variety Loss Logic (Best-of-K)
             preds_k = []
             data_dicts_k = []
             for _ in range(k):
-                p, d = generator(batch)
-                p = p.permute(1, 0, 2)
-                preds_k.append(p)
+                p_norm, d = generator(batch) # Output: [agents, time, 2]
+                # p_norm = agent_current_pos + p_offset
+                preds_k.append(p_norm)
                 data_dicts_k.append(d)
                 
-            stack_preds = torch.stack(preds_k, dim=0) 
+            stack_preds = torch.stack(preds_k, dim=0) # [K, Agents, Time, 2]
             
-            # L2 Error Calculation
-            diff = stack_preds - pred_real_abs.unsqueeze(0)
-            dist_sq = diff.pow(2).sum(dim=-1)
+            # L2 Error Calculation (Find best k)
+            diff = stack_preds - pred_real_norm.unsqueeze(0) # [K, Agents, Time, 2]
+            dist_sq = diff.pow(2).sum(dim=-1) # [K, Agents, Time]
+
+            masked_dist = dist_sq * loss_mask # [K, Agents, Time]
+
+            loss_dist = masked_dist.sum(dim=2) # [K, Agents]
             
-            if loss_mask is not None:
-                mask_reshaped = loss_mask.transpose(0, 1).unsqueeze(0)
-                loss_dist = (dist_sq * mask_reshaped).sum(dim=1)
-            else:
-                loss_dist = dist_sq.sum(dim=1)
-                
-            min_vals, min_inds = loss_dist.min(dim=0)
-            
+            min_vals, min_inds = loss_dist.min(dim=0) # Min over K -> [Agents]
+
             # Gather Best Trajectories
-            agents_num = stack_preds.shape[2]
+            batch_size = stack_preds.shape[1]
             best_pred_list = []
-            for i in range(agents_num):
+            for i in range(batch_size):
                 best_idx = min_inds[i].item()
-                best_pred_list.append(stack_preds[best_idx, :, i, :])
-            best_pred_fake = torch.stack(best_pred_list, dim=1)
+                # Select: [K, B, T, 2] -> [T, 2]
+                best_pred_list.append(stack_preds[best_idx, i, :, :])
+            
+            # Stack back to [Batch, Time, 2]
+            best_pred_fake = torch.stack(best_pred_list, dim=0)
             best_data_dict = data_dicts_k[0]
 
         # --- Losses Calculation ---
-        l2 = l2_loss(best_pred_fake, pred_real_abs, loss_mask, mode='average')
-        loss = loss + args.l2_loss_weight * l2  # Use standard addition to avoid inplace errors
+        best_pred_fake = best_pred_fake.permute(1, 0, 2)
+        pred_real_norm = pred_real_norm.permute(1, 0, 2)
+        # breakpoint()
+        l2 = l2_loss(best_pred_fake, pred_real_norm, loss_mask, mode='average')
+        
+        loss = loss + args.l2_loss_weight * l2
         losses['G_l2'] = l2.item()
-
         if args.use_cvae:
             q_dist = best_data_dict['q_z_dist']
             p_dist = best_data_dict['p_z_dist_infer']
             kl = torch.distributions.kl.kl_divergence(q_dist, p_dist).sum(dim=-1).mean()
             loss = loss + args.kl_weight * kl
             losses['G_kl'] = kl.item()
-
+        # breakpoint()
         if not is_warmup:
+            # scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
             scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
             loss_adv = g_loss_fn(scores_fake)
             loss = loss + loss_adv
@@ -1057,6 +1268,8 @@ def load_config_from_yaml(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config if config else {}
+
+
 
 
 if __name__ == '__main__':
