@@ -96,12 +96,13 @@ class AgentFormerGenerator(nn.Module):
         # B. Future Decoder (Processes Context C + Noise Z -> Future Y)
         self.future_decoder = FutureDecoder(cfg.future_decoder, self.ctx)
 
-    def forward(self, data, z=None):
+    def forward(self, data, z=None, k=1):
         """
         Args:
             data: Dictionary containing 'pre_motion', 'agent_mask', etc.
             z: Latent noise vector [Batch_Size, agent_num, nz]. 
                If None, it is sampled from N(0,1).
+            k: Number of samples to generate for Best-of-K evaluation.
         Returns:
             pred_fake: The generated future trajectories.
         """
@@ -117,14 +118,13 @@ class AgentFormerGenerator(nn.Module):
             z = data['q_z_samp']
         else:
             if z is None:
-                # Sample standard gaussian noise for GAN
-                z = torch.randn(data['agent_num'], self.cfg.nz).to(data['pre_motion'].device)
-
+                # Sample k samples of standard gaussian noise for GAN
+                z = torch.randn(data['agent_num']*k, self.cfg.nz).to(data['pre_motion'].device)
         # 3. Decode Future (Generation) by x^{T} and latent vector
         # We use mode='infer' to generate future trajectories from the latent noise z
         # 'sample_num' is usually 1 for GAN training (1-to-1 mapping of Z to Y)
         # self.future_decoder(data, mode='infer', sample_num=1, autoregress=True, z=z)
-        self.future_decoder(data, mode='infer', autoregress=True, z=z)
+        self.future_decoder(data, mode='infer', sample_num=k, autoregress=True, z=z)
 
         # 4. Return Output
         # data['infer_dec_motion'] contains the predicted trajectory

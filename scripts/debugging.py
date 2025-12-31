@@ -72,13 +72,10 @@ def main():
         max_agents_limit=args.max_agents
     )
 
-    # 4. 執行 Epoch 迴圈測試
-    num_epochs = 10
-    
+    num_epochs = 20
     for epoch in range(1, num_epochs + 1):
         print(f"\n=== Starting Epoch {epoch} ===")
-        
-        # 呼叫 reset (這應該會觸發內部的 shuffle)
+    
         batcher.reset()
         
         batch_count = 0
@@ -87,7 +84,6 @@ def main():
         max_agents_in_batch = 0
         
         while batcher.has_data():
-            # 獲取 Batch (這是 raw list，尚未轉 Tensor)
             batch = batcher.next_batch()
             
             if batch is None:
@@ -95,9 +91,6 @@ def main():
                 
             batch_count += 1
             
-            # 檢查 Agent 數量
-            # collate_scenes 回傳的字典中，'pre_motion_3D' 是一個包含所有 agent 的 list
-            # 如果 augment=True，這裡的數量應該已經包含原始 + 旋轉後的 agent
             current_agents = len(batch['pre_motion_3D'])
             total_agents_processed += current_agents
             

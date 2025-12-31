@@ -19,11 +19,23 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 sys.path.append(os.getcwd())
+# Add scripts directory to path for importing analyze_checkpoint
+scripts_dir = os.path.dirname(os.path.abspath(__file__))
+if scripts_dir not in sys.path:
+    sys.path.insert(0, scripts_dir)
+
 # Import Data Generator (The Iterator based one)
 from model.data.dataloader import data_generator
 from model.sgan3A import AgentFormerGenerator, AgentFormerDiscriminator
 from model.losses import gan_g_loss, gan_d_loss, l2_loss
 from utils.logger import Logger
+
+# Import plotting function from analyze_checkpoint
+try:
+    from analyze_checkpoint import plot_training_curves
+    PLOTTING_AVAILABLE = True
+except ImportError:
+    PLOTTING_AVAILABLE = False
 
 torch.backends.cudnn.benchmark = True
 
@@ -293,11 +305,11 @@ def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_lim
     if len(scene_samples) == 0:
         return None
 
-    # 3. 執行 Online Augmentation (Data Doubling)
+    # 3. Perform Online Augmentation (Data Doubling)
     if augment:
         augmented_samples = []
         for scene in scene_samples:
-            # 深拷貝以避免修改到原始數據
+            # Deep copy to avoid modifying original data
             aug_scene = copy.deepcopy(scene)
             
             # Rotate by 2 * pi / 24 = pi / 12 (15 degrees interval)
@@ -310,7 +322,7 @@ def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_lim
         scene_samples.extend(augmented_samples)
 
     # 4. Collate 
-    # mask=True 代表會建立 Agent Mask (Block Diagonal)，這裡會自動處理變大後的 batch
+    # mask=True means Agent Mask (Block Diagonal) will be created, automatically handles enlarged batch
     return collate_scenes(scene_samples, mask=len(scene_samples)>1)
 
 
@@ -320,7 +332,7 @@ class SmartBatcher:
         self.augment = augment
         self.buffer = deque()
         
-        # Q1優化: 初始化時就處理好 Augmentation 的係數
+        # Q1 optimization: Handle augmentation coefficients during initialization
         if self.augment:
             self.target_count = max(1, batch_size // 2)
             self.effective_limit = max_agents_limit // 2
@@ -332,15 +344,15 @@ class SmartBatcher:
         self.generator_exhausted = False
             
     def reset(self):
-        """每個 Epoch 開始前呼叫"""
+        """Called before each epoch starts"""
         self.buffer.clear()
         self.generator.shuffle()
         self.generator_exhausted = False 
         
     def has_data(self):
         """
-        判斷是否還有數據。
-        關鍵：這裡絕對不呼叫 generator.is_epoch_end()，只看 Buffer 和內部的 Flag。
+        Check if there is still data available.
+        Key: Never call generator.is_epoch_end() here, only check Buffer and internal Flag.
         """
         if len(self.buffer) > 0:
             return True
@@ -352,7 +364,7 @@ class SmartBatcher:
         current_raw_agents = 0
         aug_to_buffer = 0 # flag to push augmentation of large scene to buffer
         
-        # 內部函數：嘗試加入場景
+        # Internal function: Try to add scene
         def try_add_scene(scene):
             nonlocal current_raw_agents
             n_agents = len(scene['pre_motion_3D'])
@@ -363,12 +375,12 @@ class SmartBatcher:
             current_raw_agents += n_agents
             return True
 
-        # --- 階段 1: 優先消化 Buffer ---
+        # --- Phase 1: Prioritize consuming Buffer ---
         while len(self.buffer) > 0 and len(scene_samples) < self.target_count:
             next_scene = self.buffer[0]
             # breakpoint()
             if try_add_scene(next_scene):
-                self.buffer.popleft() # 成功加入，移出 Buffer
+                self.buffer.popleft() # Successfully added, remove from Buffer
             else: # case if scene is too large to fit in batch
                 if len(scene_samples) == 0: # still fetch if batch is empty
                     scene_samples.append(self.buffer.popleft())
@@ -378,9 +390,9 @@ class SmartBatcher:
                 # if batch is not empty, do not fetch this large scene
                 break
 
-        # --- 階段 2: 從 Generator 獲取新數據 ---
+        # --- Phase 2: Fetch new data from Generator ---
         while len(scene_samples) < self.target_count and current_raw_agents < self.effective_limit:
-            # 如果已經達到 Agent 限制，就不再抓新的
+            # If agent limit is reached, stop fetching new ones
             # if current_raw_agents >= self.effective_limit:
             #     break
 
@@ -390,10 +402,10 @@ class SmartBatcher:
 
             # epoch end
             if self.generator.is_epoch_end():
-                self.generator_exhausted = True # 標記起來，之後 has_data 就會回傳 False
+                self.generator_exhausted = True # Mark it, so has_data will return False afterwards
                 break
 
-            # 獲取數據
+            # Fetch data
             scene = self.generator()
             
             if scene is None: continue
@@ -405,7 +417,7 @@ class SmartBatcher:
                     break
                 self.buffer.append(scene)
                 
-                # break # 結束這一輪 Fetch
+                # break # End this round of fetching
         # breakpoint()
         if len(scene_samples) == 0:
             return None
@@ -416,26 +428,26 @@ class SmartBatcher:
             new_aug_agents_count = 0
 
             for scene in scene_samples:
-                # 1. 檢查是否已經是增強過的場景 (避免無限循環)
+                # 1. Check if scene is already augmented (avoid infinite loop)
                 if scene.get('is_augmented', False):
                     continue
 
-                # 2. 產生增強版
+                # 2. Generate augmented version
                 aug_scene = copy.deepcopy(scene)
                 k = np.random.randint(0, 24) 
                 angle = k * (2 * np.pi / 24)
                 aug_scene = rotate_scene(aug_scene, angle)
-                aug_scene['is_augmented'] = True # 標記它！
+                aug_scene['is_augmented'] = True # Mark it!
                 
                 new_augmented_samples.append(aug_scene)
                 new_aug_agents_count += len(aug_scene['pre_motion_3D'])
 
-            # 3. 你的邏輯：算總帳
-            # 如果 (原本的 + 新增強的) > Limit，就把增強版存 Buffer
+            # 3. Logic: Calculate total
+            # If (original + new augmented) > Limit, store augmented version in Buffer
             if (current_raw_agents + new_aug_agents_count) > self.effective_limit:
                 self.buffer.extend(new_augmented_samples)
             else:
-                # 沒爆，就加入當前 Batch
+                # If not exceeded, add to current Batch
                 scene_samples.extend(new_augmented_samples)
 
         # debug
@@ -446,7 +458,7 @@ class SmartBatcher:
         #     # for scene in augmented_samples:
         #     #     print(f"augmented scene agents: {len(scene['pre_motion_3D'])}")
         #     breakpoint()
-        # --- 階段 4: Collate ---
+        # --- Phase 4: Collate ---
         return collate_scenes(scene_samples, mask=len(scene_samples)>1)
 
 
@@ -527,11 +539,11 @@ def rotate_scene(scene, angle):
 
 
 def relative_to_abs(rel_traj, start_pos):
-    # 1. 對時間軸做累加 (Cumulative Sum) -> 算出相對於 start_pos 的總位移
+    # 1. Cumulative sum over time axis -> Calculate total displacement relative to start_pos
     rel_traj = torch.cumsum(rel_traj, dim=0)
     
-    # 2. 加上起始位置 (start_pos)
-    # start_pos 需要 unsqueeze 變成 [1, batch, 2] 才能做廣播加法
+    # 2. Add starting position (start_pos)
+    # start_pos needs to be unsqueezed to [1, batch, 2] for broadcasting addition
     abs_traj = rel_traj + start_pos.unsqueeze(0)
     
     return abs_traj
@@ -708,7 +720,7 @@ def main(args):
     # Calculate iterations (Approximate)
     iterations_per_epoch = train_gen.num_total_samples // args.batch_size
     if iterations_per_epoch == 0: iterations_per_epoch = 1
-    num_iterations = args.num_epochs * iterations_per_epoch
+    # num_iterations = args.num_epochs * iterations_per_epoch
     
     logger.info(f'Start Training. Epochs: {args.num_epochs}, Batch Size: {args.batch_size}')
 
@@ -775,8 +787,8 @@ def main(args):
                     log_str += f'| G_kl: {losses_g.get("G_kl", 0):.4f}'
                 logger.info(log_str)
 
-            if t >= num_iterations:
-                break
+            # if t >= num_iterations:
+            #     break
         
         # --- SAVE EPOCH AVERAGE, MIN, MAX LOSSES TO HISTORY ---
         if batch_count > 0:
@@ -870,6 +882,14 @@ def main(args):
             best_path = os.path.join(args.output_dir, f'{args.checkpoint_name}_best.pt')
             torch.save(checkpoint, best_path)
             logger.info(f'New Best Model (ADE+FDE: {current_ade_fde:.4f}, ADE: {val_metrics["ade"]:.4f}, FDE: {val_metrics["fde"]:.4f}) saved: {best_path}')
+        
+        # Plot training curves at the end of each epoch
+        if PLOTTING_AVAILABLE:
+            try:
+                plot_training_curves(checkpoint, output_dir=args.output_dir, smooth_window=5)
+                logger.info('Training curves updated')
+            except Exception as e:
+                logger.warning(f'Failed to plot training curves: {e}')
 
 
 def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimizer_d, scaler, device):
@@ -899,7 +919,7 @@ def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimiz
     # 3. Backward with Scaler
     scaler.scale(loss).backward()
     
-    # 4. Gradient Clipping (必須先 Unscale)
+    # 4. Gradient Clipping (must unscale first)
     if args.clipping_threshold_d > 0:
         scaler.unscale_(optimizer_d)
         nn.utils.clip_grad_norm_(discriminator.parameters(), args.clipping_threshold_d)
@@ -925,7 +945,7 @@ def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimiz
     
 #     optimizer_g.zero_grad()
 
-#     # 開啟混合精度環境
+#     # Enable mixed precision environment
 #     # with torch.amp.autocast('cuda'):
 #     # with torch.cuda.amp.autocast(enabled=(args.device.type == 'cuda')):
 #     with torch.cuda.amp.autocast(enabled=False):
@@ -1027,14 +1047,15 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
         loss = torch.zeros(1, device=device)
         
         # Ground Truth & Pre-processing
-        # 1. 將 GT 轉為 [Batch, Time, 2] 以便統一計算
+        # 1. Convert GT to [Batch, Time, 2] for unified calculation
         pred_real_norm = batch['fut_motion'].permute(1, 0, 2) 
         
-        # 2. 準備當前位置用於還原 (Residual Connection)
-        # [Batch, 2] -> [Batch, 1, 2] (方便廣播加到 Time 維度)
+        # 2. Prepare current position for restoration (Residual Connection)
+        # [Batch, 2] -> [Batch, 1, 2] (convenient for broadcasting addition to Time dimension)
         # agent_current_pos = batch['agent_current_pos'].unsqueeze(1) 
         
         loss_mask = batch.get('fut_mask', None)
+        breakpoint()
         if loss_mask is not None:
             # [Time, agents] -> 
             loss_mask = loss_mask.transpose(0, 1)   # [agents, Time]
@@ -1045,53 +1066,57 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
         if k == 1:
             pred_fake_offset, data_dict = generator(batch) # Output: [agents, time, 2]
             
-            # 還原座標: [Batch, 1, 2] + [Batch, Time, 2]
+            # Restore coordinates: [Batch, 1, 2] + [Batch, Time, 2]
             pred_fake_norm = pred_fake_offset  #+  agent_current_pos
             
             best_pred_fake = pred_fake_norm
             best_data_dict = data_dict
         else:
             # Variety Loss Logic (Best-of-K)
-            preds_k = []
-            data_dicts_k = []
-            for _ in range(k):
-                p_norm, d = generator(batch) # Output: [agents, time, 2]
-                # p_norm = agent_current_pos + p_offset
-                preds_k.append(p_norm)
-                data_dicts_k.append(d)
-                
-            stack_preds = torch.stack(preds_k, dim=0) # [K, Agents, Time, 2]
+            # preds_k = []
+            # data_dicts_k = []  # dicts for cvae are not used for now, but keep for future use
+            # for _ in range(k):
+            #     p_norm, d = generator(batch) # Output: [agents, time, 2]
+            #     # p_norm = agent_current_pos + p_offset
+            #     preds_k.append(p_norm)
+            #     data_dicts_k.append(d)
+            # stack_preds = torch.stack(preds_k, dim=0) # [K, Agents, Time, 2]
+
+            # for k variety loss
+            stack_preds, data_dicts_k = generator(batch, k=k)  # Output: [agents, K, time, 2]
+            stack_preds = stack_preds.permute(1, 0, 2, 3) # [K, Agents, Time, 2]
             
             # L2 Error Calculation (Find best k)
             diff = stack_preds - pred_real_norm.unsqueeze(0) # [K, Agents, Time, 2]
-            dist_sq = diff.pow(2).sum(dim=-1) # [K, Agents, Time]
+            dist_sq = diff.pow(2).sum(dim=-1) # sum x,y -> [K, Agents, Time]
 
             masked_dist = dist_sq * loss_mask # [K, Agents, Time]
 
-            loss_dist = masked_dist.sum(dim=2) # [K, Agents]
+            loss_dist = masked_dist.sum(dim=2) # sum time -> [K, Agents]
             
             min_vals, min_inds = loss_dist.min(dim=0) # Min over K -> [Agents]
 
-            # Gather Best Trajectories
+            # TODO: Gather Best Trajectories for each agent
             batch_size = stack_preds.shape[1]
             best_pred_list = []
+            
             for i in range(batch_size):
                 best_idx = min_inds[i].item()
-                # Select: [K, B, T, 2] -> [T, 2]
+                # Select: [K, Agents, Time, 2] -> [Time, 2]
                 best_pred_list.append(stack_preds[best_idx, i, :, :])
             
-            # Stack back to [Batch, Time, 2]
+            # Stack back to [Agents, Time, 2]
             best_pred_fake = torch.stack(best_pred_list, dim=0)
-            best_data_dict = data_dicts_k[0]
+            # best_data_dict = data_dicts_k[0]
 
         # --- Losses Calculation ---
-        best_pred_fake = best_pred_fake.permute(1, 0, 2)
+        best_pred_fake = best_pred_fake.permute(1, 0, 2)  # [Time, Agents, 2]
         pred_real_norm = pred_real_norm.permute(1, 0, 2)
-        # breakpoint()
         l2 = l2_loss(best_pred_fake, pred_real_norm, loss_mask, mode='average')
         
         loss = loss + args.l2_loss_weight * l2
         losses['G_l2'] = l2.item()
+        
         if args.use_cvae:
             q_dist = best_data_dict['q_z_dist']
             p_dist = best_data_dict['p_z_dist_infer']
@@ -1153,50 +1178,50 @@ def check_accuracy(args, loader, generator, limit=False, k=20, augment=False):
             # 3. Multiple Sampling (Best-of-N)
             pred_fake_list = []
             for _ in range(k):
-                # 假設 generator 輸出是 [Agents, Time, 2]
+                # Assume generator output is [Agents, Time, 2]
                 pred_fake_abs, _ = generator(batch) 
                 pred_fake_list.append(pred_fake_abs)
             
             # [K, Agents, Time, 2]
             pred_fake_k = torch.stack(pred_fake_list, dim=0) 
             
-            # 處理 Ground Truth: [Time, Agents, 2] -> [Agents, Time, 2] -> [K, Agents, Time, 2]
+            # Process Ground Truth: [Time, Agents, 2] -> [Agents, Time, 2] -> [K, Agents, Time, 2]
             pred_real_abs = batch['fut_motion'].permute(1, 0, 2)
             pred_real_k = pred_real_abs.unsqueeze(0).expand(k, -1, -1, -1)
             
             # 4. Calculate Difference
             diff = pred_fake_k - pred_real_k
             
-            # dist shape: [K, Agents, Time] (因為 dim=-1 把座標 (x,y) 算掉了)
+            # dist shape: [K, Agents, Time] (because dim=-1 sums over coordinates (x,y))
             dist = torch.norm(diff, dim=-1) 
             dist_sq = diff.pow(2).sum(dim=-1)
             
             # Handling Valid Mask
             if 'fut_mask' in batch:
-                # batch['fut_mask'] 原始通常是 [Time, Agents]
-                # 我們需要轉置成 [Agents, Time] 來配合 dist
+                # batch['fut_mask'] is originally usually [Time, Agents]
+                # We need to transpose to [Agents, Time] to match dist
                 valid_mask = batch['fut_mask'].transpose(0, 1) > 0 
                 valid_mask_k = valid_mask.unsqueeze(0) # [1, Agents, Time]
                 
                 # --- ADE Calculation ---
-                # 現在 Time 是 dim=2，所以我們要對 dim=2 求和
+                # Now Time is dim=2, so we sum over dim=2
                 # [K, Agents, Time] -> sum(dim=2) -> [K, Agents]
                 ade_k = (dist * valid_mask_k).sum(dim=2) / (valid_mask_k.sum(dim=2) + 1e-6)
                 
                 # --- FDE Calculation ---
-                # 取最後一個時間點 (Time is dim 2, so index -1 at axis 2)
+                # Take the last time point (Time is dim 2, so index -1 at axis 2)
                 fde_k = dist[:, :, -1] * valid_mask_k[:, :, -1]
                 
                 # --- L2 (MSE) Calculation ---
                 l2_k = (dist_sq * valid_mask_k).sum(dim=2) / (valid_mask_k.sum(dim=2) + 1e-6)
                 
             else:
-                # 如果沒有 Mask，直接對 Time (dim=2) 取平均
+                # If no Mask, directly average over Time (dim=2)
                 ade_k = dist.mean(dim=2) # [K, Agents]
                 fde_k = dist[:, :, -1]   # [K, Agents]
                 l2_k = dist_sq.mean(dim=2) # [K, Agents]
             
-            # 5. Best-of-N Selection (保持不變，因為 input 已經是 [K, Agents])
+            # 5. Best-of-N Selection (unchanged, because input is already [K, Agents])
             best_ade, best_idx = ade_k.min(dim=0) # [Agents]
             best_fde, _ = fde_k.min(dim=0)        # [Agents]
             best_l2, _ = l2_k.min(dim=0)          # [Agents]

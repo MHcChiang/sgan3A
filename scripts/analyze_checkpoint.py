@@ -29,7 +29,9 @@ if project_root not in sys.path:
 
 try:
     import matplotlib.pyplot as plt
+    import matplotlib.font_manager as fm
     import numpy as np
+    import warnings
     PLOTTING_AVAILABLE = True
 except ImportError:
     PLOTTING_AVAILABLE = False
@@ -205,8 +207,21 @@ def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
         print("Cannot plot: matplotlib not available")
         return
     
-    # Set font to Times New Roman
-    plt.rcParams['font.family'] = 'Times New Roman'
+    # Set font to Times New Roman if available, otherwise use default serif font
+    # Suppress warnings if font is not available
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            # Check if Times New Roman is available in font cache
+            font_names = {f.name for f in fm.fontManager.ttflist}
+            if 'Times New Roman' in font_names:
+                plt.rcParams['font.family'] = 'Times New Roman'
+            else:
+                # Fall back to serif font family (usually available)
+                plt.rcParams['font.family'] = 'serif'
+        except Exception:
+            # If font checking fails, use default serif
+            plt.rcParams['font.family'] = 'serif'
     
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     fig.suptitle('Training Diagnostics Dashboard', fontsize=16, fontweight='bold')

@@ -20,7 +20,7 @@ g_steps: 2
 d_steps: 1              # Standard GAN practice (train D more)
 clipping_threshold_g: 1.0
 clipping_threshold_d: 1.0
-k: 10
+k: 15
 warmup_epochs: 1
 resume_warmup_from: None #'warmed.pt'
 
@@ -62,14 +62,14 @@ z_type: 'gaussian'
 # --- CVAE Control ---
 use_cvae: 0             
 kl_weight: 1.0          # "coefficient beta ... equals 1" [cite: 281]
-l2_loss_weight: 1.0 
+l2_loss_weight: 0.5 
 
 # --- Output ---
-output_dir: './checkpoints/1207_Aug_b4_WR1_K10'
-print_every: 50
+output_dir: './checkpoints/k20'
+print_every: 100
 checkpoint_every: 1000
-checkpoint_name: '1207_Aug_b4_WR1_K10'
-restore_from_checkpoint: 1
+checkpoint_name: 'k20'
+restore_from_checkpoint: 0
 num_samples_check: 500
 use_gpu: 1
 gpu_num: "0"

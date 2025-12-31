@@ -135,15 +135,20 @@ def draw_trajectory(args, loader, generator):
             ax.plot(gt_plot[:, 0], gt_plot[:, 1], 'g-', linewidth=2, alpha=0.5, label='GT' if n==0 else "")
             ax.scatter(gt[-1, n, 0], gt[-1, n, 1], c='g', s=30, marker='*') # End marker
 
-            # --- C. Plot Best Prediction (Red) ---
-            # FIX 1: Draw ONLY the best trajectory
+            # --- C. Plot All K Predictions (Light Red) ---
+            for k in range(K):
+                pred_k = all_preds[k, :, n, :] # [Time, 2]
+                pred_plot_k = np.vstack([last_obs, pred_k])
+                ax.plot(pred_plot_k[:, 0], pred_plot_k[:, 1], color='lightcoral', linewidth=0.5, alpha=0.3, label='All Preds' if (n==0 and k==0) else "")
+
+            # --- D. Plot Best Prediction (Dark Red, Bold) ---
             best_k = best_indices[n]
             best_pred = all_preds[best_k, :, n, :] # [Time, 2]
             
             # FIX 2: Fill Gap
             pred_plot = np.vstack([last_obs, best_pred])
             
-            ax.plot(pred_plot[:, 0], pred_plot[:, 1], 'r--', linewidth=2, label='Pred' if n==0 else "")
+            ax.plot(pred_plot[:, 0], pred_plot[:, 1], 'r--', linewidth=2, color='darkred', label='Best Pred' if n==0 else "")
 
         ax.set_title(f"Scene {i+1} (N={num_agents})")
         ax.axis('equal')
