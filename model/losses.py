@@ -122,3 +122,59 @@ def final_displacement_error(
         return loss
     else:
         return torch.sum(loss)
+
+
+
+def select_best_k_scene(stack_preds, pred_real, seq_start_end, loss_mask=None):
+    """
+    Selects the best sample from K based on Scene-Level Sum of Squared Errors (L2).
+    This preserves the joint distribution of agents in the same scene.
+    
+    Args:
+        stack_preds: [K, Agents, Time, 2] - Generated samples
+        pred_real: [Agents, Time, 2] - Ground Truth
+        seq_start_end: List of tuples [(start, end), ...] - Scene boundaries
+        loss_mask: [Agents, Time] or None - Valid frames mask
+        
+    Returns:
+        best_pred: [Agents, Time, 2] - The selected best trajectories
+    """
+    # 1. Calculate Squared Error per Agent per Sample
+    # [K, Agents, Time, 2] - [1, Agents, Time, 2]
+    diff = stack_preds - pred_real.unsqueeze(0) 
+    dist_sq = diff.pow(2).sum(dim=-1) # [K, Agents, Time]
+
+    if loss_mask is not None:
+        # mask: [Agents, Time] -> [1, Agents, Time]
+        dist_sq = dist_sq * loss_mask.unsqueeze(0)
+
+    # Sum over time -> Total error per agent for each K
+    # error_agent: [K, Agents]
+    error_agent = dist_sq.sum(dim=2) 
+    
+    best_pred_list = []
+    scene_min_losses = []
+
+    # 2. Scene-Level Selection
+    for start, end in seq_start_end:
+        # Extract errors for this scene: [K, n_agents_in_scene]
+        scene_errors = error_agent[:, start:end]
+        
+        # Sum errors across all agents in the scene -> [K]
+        # This is the "Variety Loss" metric for the scene
+        scene_total_error = scene_errors.sum(dim=1)
+        
+        # Find the single best K for this entire scene
+        min_val, best_k_idx = scene_total_error.min(dim=0)
+        best_k = best_k_idx.item()
+
+        scene_min_losses.append(min_val)
+        
+        # Select that sample for ALL agents in this scene
+        # stack_preds[best_k]: [Agents, Time, 2] -> slice [start:end]
+        best_pred_list.append(stack_preds[best_k, start:end, :, :])
+        
+    # Concatenate back to [Agents, Time, 2]
+    best_pred = torch.cat(best_pred_list, dim=0)
+    batch_l2_loss = torch.sum(torch.stack(scene_min_losses))
+    return best_pred, batch_l2_loss

@@ -27,7 +27,7 @@ if scripts_dir not in sys.path:
 # Import Data Generator (The Iterator based one)
 from model.data.dataloader import data_generator
 from model.sgan3A import AgentFormerGenerator, AgentFormerDiscriminator
-from model.losses import gan_g_loss, gan_d_loss, l2_loss
+from model.losses import gan_g_loss, gan_d_loss, l2_loss, select_best_k_scene
 from utils.logger import Logger
 
 # Import plotting function from analyze_checkpoint
@@ -253,6 +253,14 @@ def collate_scenes(scenes, mask=False):
     total_agents = sum(agents_per_scene)
     batch_data['agent_num'] = total_agents
 
+    # Prepare seq_start_end for variety loss
+    seq_start_end = []
+    current_idx = 0
+    for n_agents in agents_per_scene:
+        seq_start_end.append((current_idx, current_idx + n_agents))
+        current_idx += n_agents
+    batch_data['seq_start_end'] = seq_start_end
+
     # Block-Diagonal Mask (-inf = Disconnected)
     if mask:
         big_mask = np.full((total_agents, total_agents), float('-inf'), dtype=np.float32)
@@ -378,7 +386,6 @@ class SmartBatcher:
         # --- Phase 1: Prioritize consuming Buffer ---
         while len(self.buffer) > 0 and len(scene_samples) < self.target_count:
             next_scene = self.buffer[0]
-            # breakpoint()
             if try_add_scene(next_scene):
                 self.buffer.popleft() # Successfully added, remove from Buffer
             else: # case if scene is too large to fit in batch
@@ -418,7 +425,7 @@ class SmartBatcher:
                 self.buffer.append(scene)
                 
                 # break # End this round of fetching
-        # breakpoint()
+
         if len(scene_samples) == 0:
             return None
 
@@ -450,14 +457,6 @@ class SmartBatcher:
                 # If not exceeded, add to current Batch
                 scene_samples.extend(new_augmented_samples)
 
-        # debug
-        # if current_raw_agents > self.effective_limit:
-        #     print(f"num of scene_samples: {len(scene_samples)}")
-        #     for i, scene in enumerate(scene_samples):
-        #         print(f"scene{i}, # agents: {len(scene['pre_motion_3D'])}")
-        #     # for scene in augmented_samples:
-        #     #     print(f"augmented scene agents: {len(scene['pre_motion_3D'])}")
-        #     breakpoint()
         # --- Phase 4: Collate ---
         return collate_scenes(scene_samples, mask=len(scene_samples)>1)
 
@@ -493,6 +492,7 @@ def prepare_batch(batch, device):
     data['scene_center'] = scene_center
     # data['agent_current_pos'] = current_pos_t0 - scene_center # to recover original position, shape: [Agents, 2]
     data['agent_num'] = pre_motion.shape[1]
+    data['seq_start_end'] = batch['seq_start_end']
     
     # ... (Rest of the function remains the same) ...
     
@@ -547,16 +547,6 @@ def relative_to_abs(rel_traj, start_pos):
     abs_traj = rel_traj + start_pos.unsqueeze(0)
     
     return abs_traj
-
-
-# # Helper to rotate a tensor [..., 2]
-# def rotate_tensor(t, c, s):
-#     # t shape: [..., 2]
-#     x = t[..., 0]
-#     y = t[..., 1]
-#     x_new = x * c - y * s
-#     y_new = x * s + y * c
-#     return torch.stack([x_new, y_new], dim=-1)
 
 
 def main(args):
@@ -731,6 +721,7 @@ def main(args):
 
     batcher = SmartBatcher(train_gen, args.batch_size, augment=args.augment, max_agents_limit=50)
     logger.info(f"Used SmartBatcher to fetch batch, batch size: {args.batch_size}, agent limit: {batcher.effective_limit*2}")
+    
     # Main training loop
     while epoch < args.num_epochs:
         epoch += 1
@@ -824,7 +815,7 @@ def main(args):
 
         logger.info('Checking validation...')
         # Use k=1 for fast validation during training (can be increased for more accurate metrics)
-        val_metrics = check_accuracy(args, val_gen, generator, limit=True, k=1, augment=False)
+        val_metrics = check_accuracy(args, val_gen, generator, limit=True, k=20, augment=False)
         logger.info(f'[Val] ADE: {val_metrics["ade"]:.4f} | FDE: {val_metrics["fde"]:.4f}')
         
         # --- SAVE VAL METRICS TO HISTORY ---
@@ -931,104 +922,6 @@ def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimiz
     return losses
 
 
-# def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, scaler, device, is_warmup=False):
-#     """
-#     Generator optimization step with optional Best-of-K (Variety Loss).
-    
-#     Args:
-#         k (int): Number of samples to generate for Variety Loss. 
-#                  If k=1, standard GAN training.
-#                  If k>1, minimizes L2 error of the best sample among k generations.
-#     """
-#     losses = {}
-#     k = args.k
-    
-#     optimizer_g.zero_grad()
-
-#     # Enable mixed precision environment
-#     # with torch.amp.autocast('cuda'):
-#     # with torch.cuda.amp.autocast(enabled=(args.device.type == 'cuda')):
-#     with torch.cuda.amp.autocast(enabled=False):
-#         loss = torch.zeros(1, device=device)
-        
-#         # Ground Truth
-#         pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
-#         loss_mask = batch.get('fut_mask', None)
-#         if loss_mask is not None:
-#             loss_mask = loss_mask.transpose(0, 1)
-
-#         # --- Forward Generator ---
-#         if k == 1:
-#             pred_fake_abs, data_dict = generator(batch)
-#             pred_fake_abs = pred_fake_abs.permute(1, 0, 2)
-#             best_pred_fake = pred_fake_abs
-#             best_data_dict = data_dict
-#         else:
-#             # Variety Loss Logic (Best-of-K)
-#             preds_k = []
-#             data_dicts_k = []
-#             for _ in range(k):
-#                 p, d = generator(batch)
-#                 p = p.permute(1, 0, 2)
-#                 preds_k.append(p)
-#                 data_dicts_k.append(d)
-                
-#             stack_preds = torch.stack(preds_k, dim=0) 
-            
-#             # L2 Error Calculation
-#             diff = stack_preds - pred_real_abs.unsqueeze(0)
-#             dist_sq = diff.pow(2).sum(dim=-1)
-            
-#             if loss_mask is not None:
-#                 mask_reshaped = loss_mask.transpose(0, 1).unsqueeze(0)
-#                 loss_dist = (dist_sq * mask_reshaped).sum(dim=1)
-#             else:
-#                 loss_dist = dist_sq.sum(dim=1)
-                
-#             min_vals, min_inds = loss_dist.min(dim=0)
-            
-#             # Gather Best Trajectories
-#             agents_num = stack_preds.shape[2]
-#             best_pred_list = []
-#             for i in range(agents_num):
-#                 best_idx = min_inds[i].item()
-#                 best_pred_list.append(stack_preds[best_idx, :, i, :])
-#             best_pred_fake = torch.stack(best_pred_list, dim=1)
-#             best_data_dict = data_dicts_k[0]
-
-#         # --- Losses Calculation ---
-#         l2 = l2_loss(best_pred_fake, pred_real_abs, loss_mask, mode='average')
-#         loss = loss + args.l2_loss_weight * l2  # Use standard addition to avoid inplace errors
-#         losses['G_l2'] = l2.item()
-
-#         if args.use_cvae:
-#             q_dist = best_data_dict['q_z_dist']
-#             p_dist = best_data_dict['p_z_dist_infer']
-#             kl = torch.distributions.kl.kl_divergence(q_dist, p_dist).sum(dim=-1).mean()
-#             loss = loss + args.kl_weight * kl
-#             losses['G_kl'] = kl.item()
-
-#         if not is_warmup:
-#             scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
-#             loss_adv = g_loss_fn(scores_fake)
-#             loss = loss + loss_adv
-#             losses['G_adv'] = loss_adv.item()
-#         else:
-#             losses['G_adv'] = 0.0
-
-#     # Backward & Step with Scaler
-#     scaler.scale(loss).backward()
-    
-#     if args.clipping_threshold_g > 0:
-#         scaler.unscale_(optimizer_g)
-#         nn.utils.clip_grad_norm_(generator.parameters(), args.clipping_threshold_g)
-        
-#     scaler.step(optimizer_g)
-#     scaler.update()
-
-#     return losses
-
-
 def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, scaler, device, is_warmup=False):
     """
     Generator optimization step with optional Best-of-K (Variety Loss).
@@ -1055,7 +948,6 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
         # agent_current_pos = batch['agent_current_pos'].unsqueeze(1) 
         
         loss_mask = batch.get('fut_mask', None)
-        breakpoint()
         if loss_mask is not None:
             # [Time, agents] -> 
             loss_mask = loss_mask.transpose(0, 1)   # [agents, Time]
@@ -1073,49 +965,26 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
             best_data_dict = data_dict
         else:
             # Variety Loss Logic (Best-of-K)
-            # preds_k = []
-            # data_dicts_k = []  # dicts for cvae are not used for now, but keep for future use
-            # for _ in range(k):
-            #     p_norm, d = generator(batch) # Output: [agents, time, 2]
-            #     # p_norm = agent_current_pos + p_offset
-            #     preds_k.append(p_norm)
-            #     data_dicts_k.append(d)
-            # stack_preds = torch.stack(preds_k, dim=0) # [K, Agents, Time, 2]
-
-            # for k variety loss
             stack_preds, data_dicts_k = generator(batch, k=k)  # Output: [agents, K, time, 2]
             stack_preds = stack_preds.permute(1, 0, 2, 3) # [K, Agents, Time, 2]
-            
-            # L2 Error Calculation (Find best k)
-            diff = stack_preds - pred_real_norm.unsqueeze(0) # [K, Agents, Time, 2]
-            dist_sq = diff.pow(2).sum(dim=-1) # sum x,y -> [K, Agents, Time]
 
-            masked_dist = dist_sq * loss_mask # [K, Agents, Time]
-
-            loss_dist = masked_dist.sum(dim=2) # sum time -> [K, Agents]
+            best_pred_fake, best_l2_sum = select_best_k_scene(
+                stack_preds, 
+                pred_real_norm, 
+                batch['seq_start_end'], 
+                loss_mask
+            )
             
-            min_vals, min_inds = loss_dist.min(dim=0) # Min over K -> [Agents]
-
-            # TODO: Gather Best Trajectories for each agent
-            batch_size = stack_preds.shape[1]
-            best_pred_list = []
-            
-            for i in range(batch_size):
-                best_idx = min_inds[i].item()
-                # Select: [K, Agents, Time, 2] -> [Time, 2]
-                best_pred_list.append(stack_preds[best_idx, i, :, :])
-            
-            # Stack back to [Agents, Time, 2]
-            best_pred_fake = torch.stack(best_pred_list, dim=0)
-            # best_data_dict = data_dicts_k[0]
-
-        # --- Losses Calculation ---
-        best_pred_fake = best_pred_fake.permute(1, 0, 2)  # [Time, Agents, 2]
-        pred_real_norm = pred_real_norm.permute(1, 0, 2)
-        l2 = l2_loss(best_pred_fake, pred_real_norm, loss_mask, mode='average')
-        
+        # Normalize the loss (Equivalent to l2_loss mode='average')
+        if loss_mask is not None:
+            # Divide by total number of valid time steps in the batch
+            l2 = best_l2_sum / torch.sum(loss_mask)
+        else:
+            # Divide by total elements (Agents * Time)
+            l2 = best_l2_sum / (best_pred_fake.shape[0] * best_pred_fake.shape[1])
         loss = loss + args.l2_loss_weight * l2
         losses['G_l2'] = l2.item()
+
         
         if args.use_cvae:
             q_dist = best_data_dict['q_z_dist']
@@ -1161,83 +1030,77 @@ def check_accuracy(args, loader, generator, limit=False, k=20, augment=False):
     """
     metrics = {}
     ade_outer, fde_outer = [], []
-    l2_outer = [] 
+    
+    # Initialize accumulators for global L2 calculation
+    total_l2_error = 0.0
+    total_valid_points = 0.0
+    
     total_traj = 0
     
     generator.eval()
     
     with torch.no_grad():
         while not loader.is_epoch_end():
-            # 1. Fetch & Collate (with optional augmentation)
+            # 1. Prepare Batch and Generate K samples
             raw_batch = fetch_and_collate_batch(loader, args.batch_size, augment=augment)
             if raw_batch is None: continue
             
-            # 2. Convert to Tensors
             batch = prepare_batch(raw_batch, get_device(args))
             
-            # 3. Multiple Sampling (Best-of-N)
-            pred_fake_list = []
-            for _ in range(k):
-                # Assume generator output is [Agents, Time, 2]
-                pred_fake_abs, _ = generator(batch) 
-                pred_fake_list.append(pred_fake_abs)
+            pred_fake_k, _ = generator(batch, k=k) # [K, Agents, Time, 2]
+            pred_fake_k = pred_fake_k.permute(1, 0, 2, 3) # [K, Agents, Time, 2]
             
-            # [K, Agents, Time, 2]
-            pred_fake_k = torch.stack(pred_fake_list, dim=0) 
-            
-            # Process Ground Truth: [Time, Agents, 2] -> [Agents, Time, 2] -> [K, Agents, Time, 2]
+            # Process Ground Truth: [Time, Agents, 2]
             pred_real_abs = batch['fut_motion'].permute(1, 0, 2)
-            pred_real_k = pred_real_abs.unsqueeze(0).expand(k, -1, -1, -1)
-            
-            # 4. Calculate Difference
-            diff = pred_fake_k - pred_real_k
-            
-            # dist shape: [K, Agents, Time] (because dim=-1 sums over coordinates (x,y))
-            dist = torch.norm(diff, dim=-1) 
-            dist_sq = diff.pow(2).sum(dim=-1)
-            
-            # Handling Valid Mask
+            # pred_real_k = pred_real_abs.unsqueeze(0).expand(k, -1, -1, -1)
+
+            loss_mask = None
             if 'fut_mask' in batch:
-                # batch['fut_mask'] is originally usually [Time, Agents]
-                # We need to transpose to [Agents, Time] to match dist
-                valid_mask = batch['fut_mask'].transpose(0, 1) > 0 
-                valid_mask_k = valid_mask.unsqueeze(0) # [1, Agents, Time]
-                
-                # --- ADE Calculation ---
-                # Now Time is dim=2, so we sum over dim=2
-                # [K, Agents, Time] -> sum(dim=2) -> [K, Agents]
-                ade_k = (dist * valid_mask_k).sum(dim=2) / (valid_mask_k.sum(dim=2) + 1e-6)
-                
-                # --- FDE Calculation ---
-                # Take the last time point (Time is dim 2, so index -1 at axis 2)
-                fde_k = dist[:, :, -1] * valid_mask_k[:, :, -1]
-                
-                # --- L2 (MSE) Calculation ---
-                l2_k = (dist_sq * valid_mask_k).sum(dim=2) / (valid_mask_k.sum(dim=2) + 1e-6)
-                
+                loss_mask = batch['fut_mask'].transpose(0, 1) # [Agents, Time]
+
+            # 3. Use Helper to Pick Best Scene Trajectories
+            best_pred_fake, batch_l2_sum = select_best_k_scene(
+                pred_fake_k, 
+                pred_real_abs, 
+                batch['seq_start_end'], 
+                loss_mask
+            )
+            
+            # --- L2 Metric Accumulation ---=
+            total_l2_error += batch_l2_sum.item()
+            
+            if loss_mask is not None:
+                total_valid_points += loss_mask.sum().item()
             else:
-                # If no Mask, directly average over Time (dim=2)
-                ade_k = dist.mean(dim=2) # [K, Agents]
-                fde_k = dist[:, :, -1]   # [K, Agents]
-                l2_k = dist_sq.mean(dim=2) # [K, Agents]
+                total_valid_points += (batch['agent_num'] * args.future_frames)
+
+            # --- ADE / FDE Calculation (using the selected best_pred_fake) ---
+            diff = best_pred_fake - pred_real_abs
+            dist = torch.norm(diff, dim=-1) # [Agents, Time]
             
-            # 5. Best-of-N Selection (unchanged, because input is already [K, Agents])
-            best_ade, best_idx = ade_k.min(dim=0) # [Agents]
-            best_fde, _ = fde_k.min(dim=0)        # [Agents]
-            best_l2, _ = l2_k.min(dim=0)          # [Agents]
-            
-            ade_outer.append(best_ade)
-            fde_outer.append(best_fde)
-            l2_outer.append(best_l2)
+            if loss_mask is not None:
+                # ADE: Average over Time (dim=1)
+                ade = (dist * loss_mask).sum(dim=1) / (loss_mask.sum(dim=1) + 1e-6)
+                # FDE: Last Time Step
+                fde = dist[:, -1] * loss_mask[:, -1]
+            else:
+                ade = dist.mean(dim=1)
+                fde = dist[:, -1]
+                
+            ade_outer.append(ade)
+            fde_outer.append(fde)
             
             total_traj += batch['agent_num']
             
             if limit and total_traj >= args.num_samples_check:
                 break
 
+    # Final Aggregation
     ade_all = torch.cat(ade_outer).mean().item()
     fde_all = torch.cat(fde_outer).mean().item()
-    l2_all = torch.cat(l2_outer).mean().item()
+    
+    # Calculate global Mean Squared Error
+    l2_all = total_l2_error / (total_valid_points + 1e-6)
     
     metrics['ade'] = ade_all
     metrics['fde'] = fde_all
