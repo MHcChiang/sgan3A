@@ -667,7 +667,7 @@ def main(args):
     
     if restore_path is not None and os.path.isfile(restore_path):
         logger.info(f'Restoring from checkpoint {restore_path}')
-        checkpoint = torch.load(restore_path, map_location=device)
+        checkpoint = torch.load(restore_path, map_location=device, weights_only=False)
         generator.load_state_dict(checkpoint['g_state'])
         discriminator.load_state_dict(checkpoint['d_state'])
         optimizer_g.load_state_dict(checkpoint['g_optim_state'])
@@ -877,7 +877,7 @@ def main(args):
         # Plot training curves at the end of each epoch
         if PLOTTING_AVAILABLE:
             try:
-                plot_training_curves(checkpoint, output_dir=args.output_dir, smooth_window=5)
+                plot_training_curves(checkpoint, output_dir=args.output_dir, smooth_window=1)
                 logger.info('Training curves updated')
             except Exception as e:
                 logger.warning(f'Failed to plot training curves: {e}')
@@ -994,7 +994,8 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
             losses['G_kl'] = kl.item()
         # breakpoint()
         if not is_warmup:
-            # scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
+            # Need: [Time, Total_Agents, 2]
+            best_pred_fake = best_pred_fake.permute(1, 0, 2)
             scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
             loss_adv = g_loss_fn(scores_fake)
             loss = loss + loss_adv

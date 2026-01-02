@@ -16,7 +16,7 @@ batch_size: 8           # If augmented, should >=2
 num_epochs: 50           # "100 epochs on ETH/UCY" [cite: 287]
 g_learning_rate: 0.0001 # "initial learning rate of 10^-4" [cite: 288]
 d_learning_rate: 0.0001
-g_steps: 2
+g_steps: 1
 d_steps: 1              # Standard GAN practice (train D more)
 clipping_threshold_g: 1.0
 clipping_threshold_d: 1.0

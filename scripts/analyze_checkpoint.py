@@ -189,7 +189,7 @@ def print_checkpoint_summary(checkpoint):
         print(f"  Decoder layers: {args.get('dec_layers', 'N/A')}")
 
 
-def plot_training_curves(checkpoint, output_dir=None, smooth_window=5):
+def plot_training_curves(checkpoint, output_dir=None, smooth_window=1):
     """
     Plot training curves in a 1x3 horizontal layout.
     
