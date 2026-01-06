@@ -1,5 +1,5 @@
 # --- Data Parameters ---
-dataset: 'eth'
+dataset: 'zara1'
 data_root_ethucy: 'datasets/eth_ucy'
 traj_scale: 1           # ETH/UCY is usually meters. Paper uses 1 or 2 depending on normalization.
 past_frames: 8          # 3.2 seconds [cite: 273]
@@ -16,7 +16,7 @@ batch_size: 8           # If augmented, should >=2
 num_epochs: 50           # "100 epochs on ETH/UCY" [cite: 287]
 g_learning_rate: 0.0001 # "initial learning rate of 10^-4" [cite: 288]
 d_learning_rate: 0.0001
-g_steps: 1
+g_steps: 2
 d_steps: 1              # Standard GAN practice (train D more)
 clipping_threshold_g: 1.0
 clipping_threshold_d: 1.0
@@ -65,10 +65,10 @@ kl_weight: 1.0          # "coefficient beta ... equals 1" [cite: 281]
 l2_loss_weight: 0.5 
 
 # --- Output ---
-output_dir: './checkpoints/k15G2'
+output_dir: './checkpoints/Z1_k15G2'
 print_every: 100
 checkpoint_every: 1000
-checkpoint_name: 'k15G2'
+checkpoint_name: Z1_k15G2'
 restore_from_checkpoint: 1
 num_samples_check: 500
 use_gpu: 1

@@ -94,7 +94,6 @@ def main():
             current_agents = len(batch['pre_motion_3D'])
             total_agents_processed += current_agents
             
-            # 檢查是否超過限制
             status = "PASS"
             if current_agents > args.max_agents:
                 status = "WARNING (Over Limit)"

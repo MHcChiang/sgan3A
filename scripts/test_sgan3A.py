@@ -233,13 +233,11 @@ if __name__ == '__main__':
     # --- Modified Arguments ---
     # input expected: path to the folder (e.g., "./results/1201_eth_orgLRs")
     parser.add_argument('--model_path', default=None, type=str, required=True, help='Path to model folder')
-    parser.add_argument('--latest', default=False, action='store_true', help='Use latest checkpoint (default: best)')
+    parser.add_argument('--latest', default=False, action='store_true', help='Use latest checkpoint (default: best)') 
     parser.add_argument('--draw', default=False, action='store_true', help='Draw trajectory (default: False)')
     
     # --- Evaluation Params ---
-    parser.add_argument('--dataset', default='eth', type=str)
-    parser.add_argument('--data_root_ethucy', default='datasets/eth_ucy', type=str)
-    parser.add_argument('--data_root_nuscenes_pred', default='datasets/nuscenes_pred', type=str)
+    # Dataset args (dataset, data_root_ethucy, data_root_nuscenes_pred) are loaded from config_saved.yaml
     parser.add_argument('--sample_k', default=20, type=int, help='Number of samples for Best-of-K evaluation')
     parser.add_argument('--batch_size', default=1, type=int, help='Batch size for evaluation')
     parser.add_argument('--num_samples_check', default=None, type=int, help='Limit number of samples to evaluate (None = all)')
@@ -277,14 +275,24 @@ if __name__ == '__main__':
     preserved_output_dir = args.output_dir
     preserved_use_gpu = args.use_gpu  # Preserve command-line value (default is 0)
     
-    if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            cfg_dict = yaml.safe_load(f)
-        
-        # Load all config values into args (including architecture params not in parser)
-        # We assume saved config is the "truth" for model architecture
-        for key, value in cfg_dict.items():
-            setattr(args, key, value)
+    if not os.path.exists(config_path):
+        print(f"Error: Config file not found at {config_path}. Cannot load dataset parameters.")
+        sys.exit(1)
+    
+    with open(config_path, 'r') as f:
+        cfg_dict = yaml.safe_load(f)
+    
+    # Load all config values into args (including architecture params not in parser)
+    # We assume saved config is the "truth" for model architecture
+    for key, value in cfg_dict.items():
+        setattr(args, key, value)
+    
+    # Validate that required dataset parameters are loaded from config
+    required_dataset_params = ['dataset', 'data_root_ethucy']
+    missing_params = [param for param in required_dataset_params if not hasattr(args, param) or getattr(args, param) is None]
+    if missing_params:
+        print(f"Error: Required dataset parameters missing from config: {missing_params}")
+        sys.exit(1)
     
     # Restore output_dir to the model directory (not the one from saved config)
     args.output_dir = preserved_output_dir
@@ -293,9 +301,6 @@ if __name__ == '__main__':
     # This prevents warnings when config has use_gpu=1 but CUDA is not available
     # use_gpu is a runtime setting, not a model architecture param, so we respect command line
     args.use_gpu = preserved_use_gpu
-    
-    if not os.path.exists(config_path):
-        print(f"Warning: Config file not found at {config_path}. Model may fail to load without proper config.")
 
     # Add .get() compatibility
     args.get = lambda key, default=None: getattr(args, key, default)
