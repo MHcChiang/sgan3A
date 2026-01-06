@@ -13,7 +13,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 sys.path.append(os.getcwd())
-from model.data.dataloader import data_generator
+from model.data.dataloader import data_generator, data_loader
 from model.sgan3A import AgentFormerGenerator
 from utils.logger import Logger
 
@@ -51,7 +51,7 @@ def draw_trajectory(args, loader, generator):
     Visualizes 10 sequences with "Per-Agent Best" logic.
     - Past: Blue
     - GT Future: Green
-    - All K Predictions: Light Red (Thin)
+    - All K Predictions: Light Red (Thin) [optional, controlled by draw_k]
     - Best Prediction (Per Agent): Dark Red (Bold)
     """
     logger.info("Drawing trajectories...")
@@ -135,11 +135,12 @@ def draw_trajectory(args, loader, generator):
             ax.plot(gt_plot[:, 0], gt_plot[:, 1], 'g-', linewidth=2, alpha=0.5, label='GT' if n==0 else "")
             ax.scatter(gt[-1, n, 0], gt[-1, n, 1], c='g', s=30, marker='*') # End marker
 
-            # --- C. Plot All K Predictions (Light Red) ---
-            for k in range(K):
-                pred_k = all_preds[k, :, n, :] # [Time, 2]
-                pred_plot_k = np.vstack([last_obs, pred_k])
-                ax.plot(pred_plot_k[:, 0], pred_plot_k[:, 1], color='lightcoral', linewidth=0.5, alpha=0.3, label='All Preds' if (n==0 and k==0) else "")
+            # --- C. Plot All K Predictions (Light Red) [Optional] ---
+            if args.draw_k:
+                for k in range(K):
+                    pred_k = all_preds[k, :, n, :] # [Time, 2]
+                    pred_plot_k = np.vstack([last_obs, pred_k])
+                    ax.plot(pred_plot_k[:, 0], pred_plot_k[:, 1], color='lightcoral', linewidth=0.5, alpha=0.3, label='All Preds' if (n==0 and k==0) else "")
 
             # --- D. Plot Best Prediction (Dark Red, Bold) ---
             best_k = best_indices[n]
@@ -210,7 +211,13 @@ def main(args):
     
     # --- Initialize Test Data ---
     logger.info(f"Loading Test Data for {args.dataset}...")
-    test_gen = data_generator(args, logger, split='test', phase='testing') # val or test
+    # Use data_loader with centered transformation (default to True if not in config)
+    centered = getattr(args, 'centered', True)
+    test_gen = data_loader(args, logger, split='test', phase='testing', centered=centered)
+    if centered:
+        logger.info("Scene-centered coordinate transformation enabled")
+    else:
+        logger.info("Scene-centered coordinate transformation disabled")
     
     if args.draw:
         draw_trajectory(args, test_gen, generator)
@@ -235,6 +242,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_path', default=None, type=str, required=True, help='Path to model folder')
     parser.add_argument('--latest', default=False, action='store_true', help='Use latest checkpoint (default: best)') 
     parser.add_argument('--draw', default=False, action='store_true', help='Draw trajectory (default: False)')
+    parser.add_argument('--draw_k', default=False, action='store_true', help='Draw all K trajectories in visualization (default: False, only draws best prediction)')
     
     # --- Evaluation Params ---
     # Dataset args (dataset, data_root_ethucy, data_root_nuscenes_pred) are loaded from config_saved.yaml

@@ -25,7 +25,7 @@ if scripts_dir not in sys.path:
     sys.path.insert(0, scripts_dir)
 
 # Import Data Generator (The Iterator based one)
-from model.data.dataloader import data_generator
+from model.data.dataloader import data_generator, data_loader
 from model.sgan3A import AgentFormerGenerator, AgentFormerDiscriminator
 from model.losses import gan_g_loss, gan_d_loss, l2_loss, select_best_k_scene
 from utils.logger import Logger
@@ -62,6 +62,7 @@ parser.add_argument('--min_future_frames', default=12, type=int)
 parser.add_argument('--frame_skip', default=1, type=int)
 parser.add_argument('--phase', default='training', type=str)
 parser.add_argument('--augment', default=0, type=int, help='1 to enable data augmentation, 0 for no augmentation')
+parser.add_argument('--centered', default=1, type=int, help='1 to enable scene-centered coordinate transformation, 0 to disable')
 
 # --- Optimization ---
 parser.add_argument('--batch_size', default=8, type=int) # Scenes per batch (if collating) or just 1
@@ -480,16 +481,10 @@ def prepare_batch(batch, device):
     # Tranpose 
     pre_motion = pre_motion.transpose(0, 1).contiguous() # [Batch, Time, 2]X
     fut_motion = fut_motion.transpose(0, 1).contiguous()
-    
-    # 1206 ADD: scene-centered coordinate system (Agentformer sec4-Implementation detail)
-    current_pos_t0 = pre_motion[-1]
-    scene_center = torch.mean(current_pos_t0, dim=0, keepdim=True) 
-    pre_motion = pre_motion - scene_center
-    fut_motion = fut_motion - scene_center
 
     data['pre_motion'] = pre_motion
     data['fut_motion'] = fut_motion
-    data['scene_center'] = scene_center
+    # Note: Scene centering is now handled in data_loader class to save compute resources
     # data['agent_current_pos'] = current_pos_t0 - scene_center # to recover original position, shape: [Agents, 2]
     data['agent_num'] = pre_motion.shape[1]
     data['seq_start_end'] = batch['seq_start_end']
@@ -704,8 +699,13 @@ def main(args):
 
     # --- Initialize Data Generator ---
     logger.info("Initializing Data Generator...")
-    train_gen = data_generator(args, logger, split='train', phase='training')
-    val_gen = data_generator(args, logger, split='val', phase='testing')
+    centered = bool(args.centered)
+    train_gen = data_loader(args, logger, split='train', phase='training', centered=centered)
+    val_gen = data_loader(args, logger, split='val', phase='testing', centered=centered)
+    if centered:
+        logger.info("Scene-centered coordinate transformation enabled")
+    else:
+        logger.info("Scene-centered coordinate transformation disabled")
     
     # Calculate iterations (Approximate)
     iterations_per_epoch = train_gen.num_total_samples // args.batch_size

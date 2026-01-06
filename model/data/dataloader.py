@@ -95,3 +95,124 @@ class data_generator(object):
 
     def __call__(self):
         return self.next_sample()
+
+
+class data_loader(data_generator):
+    """
+    New-added class to apply coordinate transformation (scene-centered coordinate system).
+    
+    This class inherits from data_generator and adds the capability to center trajectories
+    around the scene center (mean position of all agents at the last observed timestep).
+    This transformation is applied at the dataloader level and cached to save compute resources
+    during training. Once a sample is centered, it is cached so subsequent accesses reuse the
+    cached version instead of recomputing the transformation.
+    """
+    
+    def __init__(self, parser, log, split='train', phase='training', centered=True):
+        """
+        Initialize the data loader with optional scene-centered coordinate transformation.
+        
+        Args:
+            parser: Configuration parser object
+            log: Logger object
+            split: Data split ('train', 'val', 'test')
+            phase: Phase ('training' or 'testing')
+            centered: If True, apply scene-centered coordinate transformation (default: True)
+        """
+        super().__init__(parser, log, split=split, phase=phase)
+        self.centered = centered
+        # Cache for centered trajectories: key is sample_index, value is centered data dict
+        self._centered_cache = {}
+    
+    def _apply_scene_centering(self, data):
+        """
+        Apply scene-centered coordinate transformation to the data.
+        
+        The scene center is computed as the mean position of all agents at the last
+        observed timestep (t=-1 of pre_motion). This center is then subtracted from
+        all trajectory points in both past and future motions.
+        
+        Args:
+            data: Dictionary containing 'pre_motion_3D' and 'fut_motion_3D' lists
+            
+        Returns:
+            Modified data dictionary with centered trajectories
+        """
+        if not self.centered:
+            return data
+        
+        pre_motion_3D = data['pre_motion_3D']
+        fut_motion_3D = data['fut_motion_3D']
+        
+        if len(pre_motion_3D) == 0:
+            return data
+        
+        # Stack all agent trajectories: [Time, Agents, 2]
+        # Each element in pre_motion_3D is [Time, 2], so we stack them along a new axis
+        stacked_pre_motion = np.stack(pre_motion_3D, axis=1)  # [Time, Agents, 2]
+        
+        # Get the last timestep positions: [Agents, 2]
+        current_pos_t0 = stacked_pre_motion[-1]
+        
+        # Compute scene center: mean across agents -> [2]
+        scene_center = np.mean(current_pos_t0, axis=0, keepdims=True)  # [1, 2]
+        
+        # Subtract center from each agent's trajectory
+        centered_pre_motion_3D = []
+        for agent_motion in pre_motion_3D:
+            # agent_motion is [Time, 2], scene_center is [1, 2]
+            centered_motion = agent_motion - scene_center
+            centered_pre_motion_3D.append(centered_motion)
+        
+        centered_fut_motion_3D = []
+        for agent_motion in fut_motion_3D:
+            centered_motion = agent_motion - scene_center
+            centered_fut_motion_3D.append(centered_motion)
+        
+        # Update data dictionary
+        data['pre_motion_3D'] = centered_pre_motion_3D
+        data['fut_motion_3D'] = centered_fut_motion_3D
+        
+        return data
+    
+    def shuffle(self):
+        """
+        Shuffle the sample list and clear the cache since sample order changes.
+        """
+        super().shuffle()
+        # Clear cache when shuffling to ensure consistency
+        self._centered_cache.clear()
+    
+    def next_sample(self):
+        """
+        Get next sample and apply scene centering if enabled.
+        Uses caching to avoid recomputing the transformation for the same sample.
+        
+        Returns:
+            Data dictionary with optionally centered trajectories
+        """
+        # Get the sample index before incrementing (used as cache key)
+        sample_index = self.sample_list[self.index]
+        
+        # Check cache first if centering is enabled
+        if self.centered and sample_index in self._centered_cache:
+            self.index += 1
+            # Return a deep copy of cached data to avoid modifying the cache
+            return copy.deepcopy(self._centered_cache[sample_index])
+        
+        # Get raw data from parent class
+        data = super().next_sample()
+        
+        if data is None:
+            return None
+        
+        # Apply scene centering transformation
+        if self.centered:
+            data = self._apply_scene_centering(data)
+            # Cache the centered data using sample_index as key
+            self._centered_cache[sample_index] = copy.deepcopy(data)
+        
+        return data
+    
+    def __call__(self):
+        return self.next_sample()
