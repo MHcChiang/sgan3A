@@ -26,9 +26,9 @@ warmup_epochs: 1
 resume_warmup_from: None #'warmed.pt'
 
 # --- Learning Rate Scheduler ---
-scheduler_type: 'exponential'        # Options: 'none', 'step', 'exponential', 'plateau', 'cosine'
-scheduler_step_size: null     # Period for StepLR (epochs). If null, uses 30% of total epochs
-scheduler_gamma: null         # Decay factor. If null, uses 0.1 for StepLR, 0.95 for Exponential
+scheduler_type: 'step'        # Options: 'none', 'step', 'exponential', 'plateau', 'cosine'
+scheduler_step_size: 10     # Period for StepLR (epochs). If null, uses 30% of total epochs
+scheduler_gamma: 0.5         # Decay factor. If null, uses 0.1 for StepLR, 0.95 for Exponential
 scheduler_min_lr: 0           # Minimum LR for CosineAnnealingLR
 scheduler_patience: 10        # Patience for ReduceLROnPlateau (epochs)
 scheduler_factor: 0.5         # Reduction factor for ReduceLROnPlateau

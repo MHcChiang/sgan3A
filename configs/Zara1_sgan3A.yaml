@@ -13,7 +13,7 @@ augment: 1
 # --- Optimization ---
 # Paper uses "Adam optimizer" [cite: 287]
 batch_size: 8           # If augmented, should >=2
-num_epochs: 30           # "100 epochs on ETH/UCY" [cite: 287]
+num_epochs: 50           # "100 epochs on ETH/UCY" [cite: 287]
 g_learning_rate: 0.0001 # "initial learning rate of 10^-4" [cite: 288]
 d_learning_rate: 0.0001
 g_steps: 2
@@ -68,7 +68,7 @@ l2_loss_weight: 1.0
 output_dir: './checkpoints/Z1_k15G2'
 print_every: 100
 checkpoint_every: 1000
-checkpoint_name: Z1_k15G2'
+checkpoint_name: Z1_k15G2
 restore_from_checkpoint: 1
 num_samples_check: 500
 use_gpu: 1

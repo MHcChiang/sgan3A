@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from .agentformer_lib import (AgentFormerEncoderLayer, AgentFormerDecoderLayer,AgentFormerEncoder, AgentFormerDecoder,)
 from .agentformer import PositionalAgentEncoding, ContextEncoder, FutureDecoder
+from torch.nn.utils import spectral_norm
 
 
 def get_noise(shape, noise_type='gaussian', device='cpu'):
@@ -173,11 +174,10 @@ class AgentFormerDiscriminator(nn.Module):
         self.tf_encoder = AgentFormerEncoder(encoder_layers, self.nlayer)
 
         # 5. Final Classifier (MLP)
-        # We pool the features and map to a single score
-        self.out_mlp = nn.Sequential(
-            nn.Linear(self.model_dim, 256),
-            nn.LeakyReLU(0.2),
-            nn.Linear(256, 1)
+        self.out_mlp = nn.Sequential(   # spectral_norm (for stability)
+            spectral_norm(nn.Linear(self.model_dim, self.model_dim//2)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Linear(self.model_dim//2, 1))
         )
 
     def forward(self, history, future, agent_mask, agent_num):
