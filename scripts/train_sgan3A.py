@@ -63,6 +63,7 @@ parser.add_argument('--frame_skip', default=1, type=int)
 parser.add_argument('--phase', default='training', type=str)
 parser.add_argument('--augment', default=0, type=int, help='1 to enable data augmentation, 0 for no augmentation')
 parser.add_argument('--centered', default=1, type=int, help='1 to enable scene-centered coordinate transformation, 0 to disable')
+parser.add_argument('--conn_dist', default=100000.0, type=float, help='Distance threshold for agent attention (valid value: below 10000.0)')
 
 # --- Optimization ---
 parser.add_argument('--batch_size', default=8, type=int) # Scenes per batch (if collating) or just 1
@@ -233,7 +234,7 @@ def create_scheduler(optimizer, scheduler_type, num_epochs, args):
 # ==========================================
 # Data Preparation Helper 
 # ==========================================
-def collate_scenes(scenes, mask=False):
+def collate_scenes(scenes, mask=False, conn_dist=10000.0):
     """
     Merges a list of scene dictionaries into a single batch dictionary.
     Creates Block-Diagonal Mask.
@@ -264,11 +265,21 @@ def collate_scenes(scenes, mask=False):
 
     # Block-Diagonal Mask (-inf = Disconnected)
     if mask:
-        big_mask = np.full((total_agents, total_agents), float('-inf'), dtype=np.float32)
+        big_mask = np.full((total_agents, total_agents), float('-inf'), dtype=np.float32) # initialize as -inf
         current_idx = 0
-        for n_agents in agents_per_scene:
-            # scene mask
+        # 0106 ADD: connectivity mask
+        for i, s in enumerate(scenes):
+            n_agents = agents_per_scene[i]
             scene_mask = np.zeros((n_agents, n_agents), dtype=np.float32)
+
+            # connectivity mask (Block agent that is too far away)
+            if conn_dist < 10000.0: # Do this only if the threshold is valid
+                curr_pos = np.stack([agent_traj[-1] for agent_traj in s['pre_motion_3D']], axis=0) # Shape: [n_agents, 2]
+                diff = curr_pos[:, None, :] - curr_pos[None, :, :] 
+                dist_mat = np.linalg.norm(diff, axis=-1) # Shape: [n_agents, n_agents]
+                scene_mask[dist_mat > conn_dist] = float('-inf')
+
+            # Fill connectivity mask into scene mask
             big_mask[current_idx : current_idx+n_agents, 
                     current_idx : current_idx+n_agents] = scene_mask
             current_idx += n_agents
@@ -277,7 +288,7 @@ def collate_scenes(scenes, mask=False):
     return batch_data
 
 
-def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_limit=10):
+def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_limit=10, conn_dist=100000.0):
     """
     Fetches scenes and applies Online Augmentation (Data Doubling). Agent-Cap Batching (Soft Limit Strategy)
     1. Fetches half batch if augment is True.
@@ -322,8 +333,8 @@ def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_lim
             aug_scene = copy.deepcopy(scene)
             
             # Rotate by 2 * pi / 24 = pi / 12 (15 degrees interval)
-            k = np.random.randint(0, 24) 
-            angle = k * (2 * np.pi / 24)
+            k = np.random.randint(0, 36) 
+            angle = k * (2 * np.pi / 36)
         
             aug_scene = rotate_scene(aug_scene, angle)
             augmented_samples.append(aug_scene)
@@ -332,14 +343,15 @@ def fetch_and_collate_batch(generator, batch_size, augment=False, max_agents_lim
 
     # 4. Collate 
     # mask=True means Agent Mask (Block Diagonal) will be created, automatically handles enlarged batch
-    return collate_scenes(scene_samples, mask=len(scene_samples)>1)
+    return collate_scenes(scene_samples, mask=len(scene_samples)>1, conn_dist=conn_dist)
 
 
 class SmartBatcher:
-    def __init__(self, generator, batch_size, augment=False, max_agents_limit=50):
+    def __init__(self, generator, batch_size, augment=False, max_agents_limit=50, conn_dist=100000.0):
         self.generator = generator
         self.augment = augment
         self.buffer = deque()
+        self.conn_dist = conn_dist
         
         # Q1 optimization: Handle augmentation coefficients during initialization
         if self.augment:
@@ -459,7 +471,7 @@ class SmartBatcher:
                 scene_samples.extend(new_augmented_samples)
 
         # --- Phase 4: Collate ---
-        return collate_scenes(scene_samples, mask=len(scene_samples)>1)
+        return collate_scenes(scene_samples, mask=len(scene_samples)>1, conn_dist=self.conn_dist)
 
 
 def prepare_batch(batch, device):
@@ -719,8 +731,8 @@ def main(args):
         'val_metrics': defaultdict(list)   # Stores ADE, FDE per check
     }
 
-    batcher = SmartBatcher(train_gen, args.batch_size, augment=args.augment, max_agents_limit=50)
-    logger.info(f"Used SmartBatcher to fetch batch, batch size: {args.batch_size}, agent limit: {batcher.effective_limit*2}")
+    batcher = SmartBatcher(train_gen, args.batch_size, augment=args.augment, max_agents_limit=50, conn_dist=args.conn_dist)
+    logger.info(f"Used SmartBatcher to fetch batch, batch size: {args.batch_size}, agent limit: {batcher.effective_limit*2}, conn_dist: {args.conn_dist}")
     
     # Main training loop
     while epoch < args.num_epochs:
@@ -1043,7 +1055,7 @@ def check_accuracy(args, loader, generator, limit=False, k=20, augment=False):
     with torch.no_grad():
         while not loader.is_epoch_end():
             # 1. Prepare Batch and Generate K samples
-            raw_batch = fetch_and_collate_batch(loader, args.batch_size, augment=augment)
+            raw_batch = fetch_and_collate_batch(loader, args.batch_size, augment=augment, conn_dist=args.conn_dist)
             if raw_batch is None: continue
             
             batch = prepare_batch(raw_batch, get_device(args))

@@ -69,7 +69,8 @@ def draw_trajectory(args, loader, generator):
     with torch.no_grad():
         while len(viz_samples) < 10 and not loader.is_epoch_end():
             # Use fetch_and_collate_batch for consistency
-            raw_batch = fetch_and_collate_batch(loader, batch_size=1, augment=False)
+            conn_dist = getattr(args, 'conn_dist', 100000.0)
+            raw_batch = fetch_and_collate_batch(loader, batch_size=1, augment=False, conn_dist=conn_dist)
             if raw_batch is None: continue
             
             batch = prepare_batch(raw_batch, device)
