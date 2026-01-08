@@ -33,6 +33,9 @@ scheduler_min_lr: 0           # Minimum LR for CosineAnnealingLR
 scheduler_patience: 10        # Patience for ReduceLROnPlateau (epochs)
 scheduler_factor: 0.5         # Reduction factor for ReduceLROnPlateau
 
+# --- Noise Std ---
+noise_std: 0.2
+
 # --- Model Architecture ---
 # "two stacks ... of identical layers" [cite: 279]
 enc_layers: 2

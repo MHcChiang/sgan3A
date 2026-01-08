@@ -180,7 +180,7 @@ class AgentFormerDiscriminator(nn.Module):
             spectral_norm(nn.Linear(self.model_dim//2, 1))
         )
 
-    def forward(self, history, future, agent_mask, agent_num):
+    def forward(self, history, future, agent_mask, agent_num, noise_std=0.0):
         """
         Args:
             history: Past Trajectories [Batch, Past_Len, 2]
@@ -188,7 +188,12 @@ class AgentFormerDiscriminator(nn.Module):
             agent_mask: Connectivity mask (from data dict)
             agent_num: Number of agents
         """
-        
+
+        # 0107 ADD: add noise to future if training and noise_std > 0.0
+        if self.training and noise_std > 0.0:
+            noise = torch.randn_like(future) * noise_std
+            future = future + noise
+
         # 1. Concatenate History and Future along Time Dimension
         # future = future.permute(1, 0, 2)
         # Concatenate: [Total_Len, Total_Agents, 2]

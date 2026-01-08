@@ -108,6 +108,7 @@ parser.add_argument('--z_type', default='gaussian', type=str)
 parser.add_argument('--enc_layers', default=2, type=int, help='Layers in Context Encoder')
 parser.add_argument('--dec_layers', default=2, type=int, help='Layers in Future Decoder')
 parser.add_argument('--input_type', default='pos', type=str) # 'pos' or 'vel'
+parser.add_argument('--noise_std', default=0.0, type=float, help='Add Gaussian noise for future trajectories in Discriminator(default: 0.0). Will decay in 20 epochs to 0.05.')
 
 # --- CVAE Control ---
 parser.add_argument('--use_cvae', default=0, type=int, help='1 to enable CVAE (KL loss), 0 for Pure GAN')
@@ -731,6 +732,10 @@ def main(args):
         'val_metrics': defaultdict(list)   # Stores ADE, FDE per check
     }
 
+    # 0107 ADD: noise_std
+    initial_noise_std = args.noise_std  
+    noise_decay_epochs = 20 
+
     batcher = SmartBatcher(train_gen, args.batch_size, augment=args.augment, max_agents_limit=50, conn_dist=args.conn_dist)
     logger.info(f"Used SmartBatcher to fetch batch, batch size: {args.batch_size}, agent limit: {batcher.effective_limit*2}, conn_dist: {args.conn_dist}")
     
@@ -749,8 +754,11 @@ def main(args):
         epoch_d_losses = defaultdict(list)
         epoch_g_losses = defaultdict(list)
         batch_count = 0
-        
-        
+
+        # 0107 ADD: noise_std
+        current_noise_std = initial_noise_std * max(0.0, 1.0 - (epoch / noise_decay_epochs))
+        logger.info(f"Current noise std: {current_noise_std}")
+
         while batcher.has_data():
         # for itr in range(iterations_per_epoch):
         #     raw_batch = fetch_and_collate_batch(train_gen, args.batch_size, augment=args.augment)
@@ -764,12 +772,12 @@ def main(args):
             # 3. Optimization
             if not is_warmup:
                 for _ in range(args.d_steps):
-                    losses_d = discriminator_step(args, batch, generator, discriminator, gan_d_loss, optimizer_d, scaler, device)
+                    losses_d = discriminator_step(args, batch, generator, discriminator, gan_d_loss, optimizer_d, scaler, device, current_noise_std)
             else:
                 losses_d = {'D_loss': 0.0}
             
             for _ in range(args.g_steps):
-                losses_g = generator_step(args, batch, generator, discriminator, gan_g_loss, optimizer_g, scaler, device, is_warmup=is_warmup)
+                losses_g = generator_step(args, batch, generator, discriminator, gan_g_loss, optimizer_g, scaler, device, is_warmup, current_noise_std)
             
             t += 1
             batch_count += 1
@@ -789,10 +797,7 @@ def main(args):
                 if args.use_cvae:
                     log_str += f'| G_kl: {losses_g.get("G_kl", 0):.4f}'
                 logger.info(log_str)
-
-            # if t >= num_iterations:
-            #     break
-        
+    
         # --- SAVE EPOCH AVERAGE, MIN, MAX LOSSES TO HISTORY ---
         if batch_count > 0:
             for k in epoch_d_losses:
@@ -895,7 +900,7 @@ def main(args):
                 logger.warning(f'Failed to plot training curves: {e}')
 
 
-def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimizer_d, scaler, device):
+def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimizer_d, scaler, device, noise_std):
     losses = {}
     optimizer_d.zero_grad()
 
@@ -934,7 +939,7 @@ def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimiz
     return losses
 
 
-def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, scaler, device, is_warmup=False):
+def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, scaler, device, is_warmup=False, noise_std=0.0):
     """
     Generator optimization step with optional Best-of-K (Variety Loss).
     
