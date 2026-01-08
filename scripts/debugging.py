@@ -19,12 +19,10 @@ from model.losses import gan_g_loss, gan_d_loss, l2_loss
 from utils.logger import Logger
 
 try:
-    # 從你的主程式引入 data_generator 和 SmartBatcher
-    # 如果你的檔名不是 train_sgan3A.py，請修改這裡
-    from scripts.train_sgan3A import data_generator, SmartBatcher
+    from utils.train_helper import SmartBatcher
 except ImportError as e:
     print(f"Import Error: {e}")
-    print("請確認 train_sgan3A.py 位於同一目錄，且裡面包含 SmartBatcher Class")
+    print("請確認 utils/train_helper.py 可供匯入並包含 SmartBatcher Class")
     sys.exit(1)
 
 # 設定 Logging

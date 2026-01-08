@@ -17,12 +17,11 @@ from model.data.dataloader import data_generator, data_loader
 from model.sgan3A import AgentFormerGenerator
 from utils.logger import Logger
 
-# Import helper functions from train_sgan3A.py
-from scripts.train_sgan3A import (
+# Import helper functions
+from utils.train_helper import (
     get_device,
     prepare_batch,
-    collate_scenes,
-    fetch_and_collate_batch,
+    SmartBatcher,
     check_accuracy
 )
 
@@ -66,11 +65,14 @@ def draw_trajectory(args, loader, generator):
     K = args.sample_k
     
     # --- 1. Collect 10 Samples ---
+    # Use SmartBatcher instead of fetch_and_collate_batch
+    conn_dist = getattr(args, 'conn_dist', 100000.0)
+    batcher = SmartBatcher(loader, batch_size=1, augment=False, max_agents_limit=50, conn_dist=conn_dist)
+    batcher.reset()
+    
     with torch.no_grad():
-        while len(viz_samples) < 10 and not loader.is_epoch_end():
-            # Use fetch_and_collate_batch for consistency
-            conn_dist = getattr(args, 'conn_dist', 100000.0)
-            raw_batch = fetch_and_collate_batch(loader, batch_size=1, augment=False, conn_dist=conn_dist)
+        while len(viz_samples) < 10 and batcher.has_data():
+            raw_batch = batcher.next_batch()
             if raw_batch is None: continue
             
             batch = prepare_batch(raw_batch, device)
