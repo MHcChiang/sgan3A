@@ -184,19 +184,20 @@ def main(args):
         'nlayer': args.enc_layers,
         'input_type': [args.input_type] # e.g. ['pos']
     }
-    
+    # args to pass to future decoder in agentformer.py
     args.future_decoder = {
         'nlayer': args.dec_layers,
-        'out_mlp_dim': [512, 256], # Standard MLP head dims
+        'out_mlp_dim': [128, 128], # Standard MLP head dims
         'input_type': [args.input_type]
     }
     
     # Also needed if using CVAE mode
-    args.future_encoder = {
-        'nlayer': args.enc_layers,
-        'out_mlp_dim': [512, 256],
-        'input_type': [args.input_type]
-    }
+    # args.future_encoder = {
+    #     'nlayer': args.enc_layers,
+    #     'out_mlp_dim': [512, 256],
+    #     'input_type': [args.input_type]
+    # }
+
     # We pass 'args' as 'cfg' to the models
     generator = AgentFormerGenerator(args).to(device)
     generator.apply(init_weights)

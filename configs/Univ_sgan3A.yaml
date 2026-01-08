@@ -38,7 +38,7 @@ noise_std: 0.2
 
 # --- Model Architecture ---
 # "two stacks ... of identical layers" [cite: 279]
-enc_layers: 2
+enc_layers: 1
 dec_layers: 2
 input_type: 'pos'
 
