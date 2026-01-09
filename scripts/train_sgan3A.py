@@ -592,8 +592,13 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
         # breakpoint()
         if not is_warmup:
             # Need: [Time, Total_Agents, 2]
-            best_pred_fake = best_pred_fake.permute(1, 0, 2)
-            scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
+            # best_pred_fake = best_pred_fake.permute(1, 0, 2)
+            # scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
+            
+            # 0109 Modify: Pick last k instead of feeding best traj to D
+            pred_fake = stack_preds[-1].permute(1, 0, 2)
+            scores_fake = discriminator(batch['pre_motion'], pred_fake, batch['agent_mask'], batch['agent_num'])
+            
             loss_adv = g_loss_fn(scores_fake)
             loss = loss + loss_adv
             losses['G_adv'] = loss_adv.item()

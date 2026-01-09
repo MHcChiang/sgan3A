@@ -34,7 +34,7 @@ scheduler_patience: 10        # Patience for ReduceLROnPlateau (epochs)
 scheduler_factor: 0.5         # Reduction factor for ReduceLROnPlateau
 
 # --- Noise Std ---
-noise_std: 0.2
+noise_std: 0.1
 
 # --- Model Architecture ---
 # "two stacks ... of identical layers" [cite: 279]
