@@ -186,7 +186,7 @@ def main(args):
     }
     args.future_decoder = {
         'nlayer': args.dec_layers,
-        'out_mlp_dim': [128, 128],
+        'out_mlp_dim': [256, 128],
         'input_type': [args.input_type]
     }
 

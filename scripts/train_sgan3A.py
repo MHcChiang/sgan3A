@@ -28,6 +28,7 @@ if scripts_dir not in sys.path:
 from model.data.dataloader import data_generator, data_loader
 from model.sgan3A import AgentFormerGenerator, AgentFormerDiscriminator
 from model.losses import gan_g_loss, gan_d_loss, l2_loss, select_best_k_scene
+from model.losses import g_hinge_loss, d_hinge_loss # new
 from utils.logger import Logger
 from utils.train_helper import (
     init_weights,
@@ -355,11 +356,13 @@ def main(args):
             if not is_warmup:
                 for _ in range(args.d_steps):
                     losses_d = discriminator_step(args, batch, generator, discriminator, gan_d_loss, optimizer_d, scaler, device, current_noise_std)
+                    losses_d = discriminator_step(args, batch, generator, discriminator, d_hinge_loss, optimizer_d, scaler, device, current_noise_std)
             else:
                 losses_d = {'D_loss': 0.0}
             
             for _ in range(args.g_steps):
-                losses_g = generator_step(args, batch, generator, discriminator, gan_g_loss, optimizer_g, scaler, device, is_warmup, current_noise_std)
+                # losses_g = generator_step(args, batch, generator, discriminator, gan_g_loss, optimizer_g, scaler, device, is_warmup, current_noise_std)
+                losses_g = generator_step(args, batch, generator, discriminator, g_hinge_loss, optimizer_g, scaler, device, is_warmup, current_noise_std)
             
             t += 1
             batch_count += 1
@@ -596,7 +599,8 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
             # scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
             
             # 0109 Modify: Pick last k instead of feeding best traj to D
-            pred_fake = stack_preds[-1].permute(1, 0, 2)
+            random_idx = torch.randint(0, k, (1,)).item()
+            pred_fake = stack_preds[random_idx].permute(1, 0, 2)
             scores_fake = discriminator(batch['pre_motion'], pred_fake, batch['agent_mask'], batch['agent_num'])
             
             loss_adv = g_loss_fn(scores_fake)

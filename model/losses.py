@@ -1,6 +1,6 @@
 import torch
 import random
-from torch.nn.functional import binary_cross_entropy_with_logits
+import torch.nn.functional as F
 
 
 def bce_loss(input, target):
@@ -20,7 +20,7 @@ def bce_loss(input, target):
     # neg_abs = -input.abs()
     # loss = input.clamp(min=0) - input * target + (1 + neg_abs.exp()).log()
     # return loss.mean()
-    return binary_cross_entropy_with_logits(input, target)
+    return F.binary_cross_entropy_with_logits(input, target)
 
 
 
@@ -178,3 +178,20 @@ def select_best_k_scene(stack_preds, pred_real, seq_start_end, loss_mask=None):
     best_pred = torch.cat(best_pred_list, dim=0)
     batch_l2_loss = torch.sum(torch.stack(scene_min_losses))
     return best_pred, batch_l2_loss
+
+
+# 0110 Add: Hinge Loss
+def g_hinge_loss(scores_fake):
+    """
+    Generator Hinge Loss: -E[D(G(z))]
+    """
+    return -torch.mean(scores_fake)
+
+def d_hinge_loss(scores_real, scores_fake):
+    """
+    Discriminator Hinge Loss:
+    L_D = E[max(0, 1 - D(x))] + E[max(0, 1 + D(G(z)))]
+    """
+    loss_real = torch.mean(F.relu(1.0 - scores_real))
+    loss_fake = torch.mean(F.relu(1.0 + scores_fake))
+    return loss_real + loss_fake
