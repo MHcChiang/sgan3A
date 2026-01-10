@@ -300,7 +300,7 @@ class FutureDecoder(nn.Module):
             self.out_fc = nn.Linear(self.model_dim, forecast_dim)
         else:
             in_dim = self.model_dim
-            self.out_mlp = MLP(in_dim, self.out_mlp_dim, 'relu')
+            self.out_mlp = MLP(in_dim, self.out_mlp_dim, 'leaky_relu')
             self.out_fc = nn.Linear(self.out_mlp.out_dim, forecast_dim)
         initialize_weights(self.out_fc.modules())
         if self.learn_prior:

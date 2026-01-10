@@ -187,7 +187,7 @@ def main(args):
     # args to pass to future decoder in agentformer.py
     args.future_decoder = {
         'nlayer': args.dec_layers,
-        'out_mlp_dim': [128, 128], # Standard MLP head dims
+        'out_mlp_dim': [256, 128], # Standard MLP head dims
         'input_type': [args.input_type]
     }
     

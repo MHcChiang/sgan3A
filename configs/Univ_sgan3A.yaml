@@ -9,7 +9,7 @@ min_future_frames: 12
 frame_skip: 1           # Use every frame (if data is already 2.5Hz)
 phase: 'training'
 augment: 1
-conn_dist: 15.0
+conn_dist: 10000
 
 # --- Optimization ---
 # Paper uses "Adam optimizer" [cite: 287]
@@ -17,7 +17,7 @@ batch_size: 8           # If augmented, should >=2
 num_epochs: 20           # "100 epochs on ETH/UCY" [cite: 287]
 g_learning_rate: 0.0001 # "initial learning rate of 10^-4" [cite: 288]
 d_learning_rate: 0.0001
-g_steps: 2
+g_steps: 1
 d_steps: 1
 clipping_threshold_g: 1.0
 clipping_threshold_d: 1.0
@@ -66,7 +66,7 @@ z_type: 'gaussian'
 # --- CVAE Control ---
 use_cvae: 0             
 kl_weight: 1.0          # "coefficient beta ... equals 1" [cite: 281]
-l2_loss_weight: 0.75
+l2_loss_weight: 0.5
 
 # --- Output ---
 output_dir: './checkpoints/U_k15G2'

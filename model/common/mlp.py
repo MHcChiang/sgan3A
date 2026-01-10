@@ -38,6 +38,8 @@ class MLP(nn.Module):
             act_layer = nn.ReLU()
         elif activation == 'sigmoid':
             act_layer = nn.Sigmoid()
+        elif activation == 'leaky_relu':
+            act_layer = nn.LeakyReLU(negative_slope=0.01)
         else:
             act_layer = nn.Identity()
 
