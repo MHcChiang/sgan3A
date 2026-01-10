@@ -69,10 +69,10 @@ kl_weight: 1.0          # "coefficient beta ... equals 1" [cite: 281]
 l2_loss_weight: 0.5
 
 # --- Output ---
-output_dir: './checkpoints/U_k15G2'
+output_dir: './checkpoints/U_k20G1'
 print_every: 100
 checkpoint_every: 1000
-checkpoint_name: 'U_k15G2'
+checkpoint_name: 'U_k20G1'
 restore_from_checkpoint: 0
 num_samples_check: 500
 use_gpu: 1
