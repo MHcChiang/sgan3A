@@ -22,7 +22,7 @@ d_steps: 1
 clipping_threshold_g: 1.0
 clipping_threshold_d: 1.0
 k: 20
-warmup_epochs: 0
+warmup_epochs: 1
 resume_warmup_from: None #'warmed.pt'
 
 # --- Learning Rate Scheduler ---
@@ -66,13 +66,13 @@ z_type: 'gaussian'
 # --- CVAE Control ---
 use_cvae: 0             
 kl_weight: 1.0          # "coefficient beta ... equals 1" [cite: 281]
-l2_loss_weight: 0.5
+l2_loss_weight: 1.0
 
 # --- Output ---
-output_dir: './checkpoints/U_k20G1'
+output_dir: './checkpoints/U_k20G2H'
 print_every: 100
 checkpoint_every: 1000
-checkpoint_name: 'U_k20G1'
+checkpoint_name: 'U_k20G2H'
 restore_from_checkpoint: 0
 num_samples_check: 500
 use_gpu: 1
