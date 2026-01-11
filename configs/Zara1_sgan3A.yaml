@@ -51,7 +51,7 @@ tf_nhead: 8
 tf_ff_dim: 512
 
 # "0.1 dropout rate" [cite: 279]
-tf_dropout: 0.15
+tf_dropout: 0.1
 
 pos_concat: true        # Required for time encoder design
 
