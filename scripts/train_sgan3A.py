@@ -355,7 +355,7 @@ def main(args):
             # 3. Optimization
             if not is_warmup:
                 for _ in range(args.d_steps):
-                    losses_d = discriminator_step(args, batch, generator, discriminator, gan_d_loss, optimizer_d, scaler, device, current_noise_std)
+                    # losses_d = discriminator_step(args, batch, generator, discriminator, gan_d_loss, optimizer_d, scaler, device, current_noise_std)
                     losses_d = discriminator_step(args, batch, generator, discriminator, d_hinge_loss, optimizer_d, scaler, device, current_noise_std)
             else:
                 losses_d = {'D_loss': 0.0}
