@@ -137,6 +137,8 @@ def draw_trajectory(args, loader, generator):
             
             ax.plot(gt_plot[:, 0], gt_plot[:, 1], 'g-', linewidth=2, alpha=0.5, label='GT' if n==0 else "")
             ax.scatter(gt[-1, n, 0], gt[-1, n, 1], c='g', s=30, marker='*') # End marker
+            if args.draw_pt:
+                ax.scatter(gt[:, n, 0], gt[:, n, 1], c='g', s=12, alpha=0.6, marker='o')
 
             # --- C. Plot All K Predictions (Light Red) [Optional] ---
             if args.draw_k:
@@ -152,7 +154,9 @@ def draw_trajectory(args, loader, generator):
             # FIX 2: Fill Gap
             pred_plot = np.vstack([last_obs, best_pred])
             
-            ax.plot(pred_plot[:, 0], pred_plot[:, 1], 'r--', linewidth=2, color='darkred', label='Best Pred' if n==0 else "")
+            ax.plot(pred_plot[:, 0], pred_plot[:, 1], 'r', linewidth=2, color='darkred', label='Best Pred' if n==0 else "")
+            if args.draw_pt:
+                ax.scatter(best_pred[:, 0], best_pred[:, 1], c='darkred', s=12, alpha=0.6, marker='o')
 
         ax.set_title(f"Scene {i+1} (N={num_agents})")
         ax.axis('equal')
@@ -241,6 +245,7 @@ if __name__ == '__main__':
     parser.add_argument('--latest', default=False, action='store_true', help='Use latest checkpoint (default: best)') 
     parser.add_argument('--draw', default=False, action='store_true', help='Draw trajectory (default: False)')
     parser.add_argument('--draw_k', default=False, action='store_true', help='Draw all K trajectories in visualization (default: False, only draws best prediction)')
+    parser.add_argument('--draw_pt', default=False, action='store_true', help='Draw per-timestep points for GT and best prediction (default: False)')
     
     # --- Evaluation Params ---
     # Dataset args (dataset, data_root_ethucy, data_root_nuscenes_pred) are loaded from config_saved.yaml
