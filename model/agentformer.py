@@ -162,14 +162,14 @@ class ContextEncoder(nn.Module):
         src_agent_mask = data['agent_mask'].clone()
         src_mask = generate_mask(tf_in.shape[0], tf_in.shape[0], data['agent_num'], src_agent_mask).to(tf_in.device)
         
-        data['context_enc'] = self.tf_encoder(tf_in_pos, mask=src_mask, num_agent=data['agent_num'])
+        data['context_enc'] = self.tf_encoder(tf_in_pos, mask=src_mask, num_agent=data['agent_num']) # [A*T, 1, mdl_dim]
         
-        context_rs = data['context_enc'].view(-1, data['agent_num'], self.model_dim)
+        context_rs = data['context_enc'].view(-1, data['agent_num'], self.model_dim) # reshape to [T, A, mdl_dim]
         # compute per agent context
         if self.pooling == 'mean':
-            data['agent_context'] = torch.mean(context_rs, dim=0)
+            data['agent_context'] = torch.mean(context_rs, dim=0) # [A, mdl_dim]
         else:
-            data['agent_context'] = torch.max(context_rs, dim=0)[0]
+            data['agent_context'] = torch.max(context_rs, dim=0)[0] # [A, mdl_dim]
 
 
 """ Future Encoder """

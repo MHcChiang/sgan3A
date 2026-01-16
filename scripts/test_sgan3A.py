@@ -6,6 +6,7 @@ import torch
 import numpy as np
 from collections import defaultdict
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -79,14 +80,8 @@ def draw_trajectory(args, loader, generator):
             pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
             
             # Generate K samples
-            batch_samples = []
-            for _ in range(K):
-                pred_fake, _ = generator(batch) 
-                pred_fake = pred_fake.permute(1, 0, 2) # [Time, Agents, 2]
-                batch_samples.append(pred_fake.unsqueeze(0))
-            
-            # Stack: [K, Time, Agents, 2]
-            all_preds = torch.cat(batch_samples, dim=0) 
+            all_preds, _ = generator(batch, k=K) # Output: [agents, K, time, 2]
+            all_preds = all_preds.permute(1, 2, 0, 3) # Stack: [K, Time, Agents, 2]
             
             # Find Best Prediction PER AGENT (min ADE)
             dist = torch.norm(all_preds - pred_real_abs.unsqueeze(0), dim=-1) # [K, Time, Agents]
@@ -132,7 +127,6 @@ def draw_trajectory(args, loader, generator):
             ax.scatter(past[0, n, 0], past[0, n, 1], c='b', s=20, marker='o') 
 
             # --- B. Plot GT Future (Green) ---
-            # FIX 2: Fill Gap (Prepend last observation)
             gt_plot = np.vstack([last_obs, gt[:, n, :]])
             
             ax.plot(gt_plot[:, 0], gt_plot[:, 1], 'g-', linewidth=2, alpha=0.5, label='GT' if n==0 else "")
@@ -169,6 +163,259 @@ def draw_trajectory(args, loader, generator):
     logger.info(f"Trajectory visualization saved to: {save_path}")
 
 
+# def draw_trajectory_attention(args, loader, generator):
+#     """
+#     Visualizes 
+#     """
+#     logger.info("Drawing trajectories...")
+#     generator.eval()
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     if args.shuffle:
+#         loader.shuffle()
+#     if hasattr(loader, 'reset'): loader.reset()
+#     else: loader.index = 0
+    
+#     # Find a scene with 3 up agents
+#     found_scene = False
+#     batch = None
+#     for raw_batch in loader:
+#         if len(raw_batch['pre_motion_3D']) >= 3:
+#             batch = prepare_batch(raw_batch, device)
+#             found_scene = True
+#             break
+            
+#     if not found_scene:
+#         print("Cant find a scene with 3 up agents, terminate...")
+#         return
+
+#     # --Inference and find best--
+#     protagonist_idx=0
+#     with torch.no_grad():
+#         K = args.sample_k if hasattr(args, 'sample_k') else 20
+#         all_preds, data_dict = generator(batch, k=K, need_weights=True) # all_preds: [Agents, K, Time, 2]
+        
+#         pred_real = batch['fut_motion'] # [Time, Agents, 2]
+#         obs_len = batch['pre_motion'].shape[0]
+#         pred_len = pred_real.shape[0]
+#         num_agents = batch['agent_num']
+
+#         # Find best K (ADE) for protagonist
+#         prot_gt = pred_real[:, protagonist_idx, :] # [Time, 2]
+#         prot_preds = all_preds[protagonist_idx]    # [K, Time, 2]
+#         ade_prot = torch.norm(prot_preds - prot_gt.unsqueeze(0), dim=-1).mean(dim=1) # [K]
+#         best_k = torch.argmin(ade_prot).item()
+        
+#         # get attention weights for this best prediction (avg of the last layer of each Head)
+#         # 根據你的輸出 shape (2, 20, 36, 24)，我們取 cross_attn_weights
+#         cross_attn = data_dict['attn_weights']['cross_attn_weights'] 
+#         # 如果有 K 維度則取 best_k，否則直接取最後一層平均
+#         if cross_attn.ndim == 5: # [Batch/K, Layers, Heads, Tgt, Src]
+#             attn_layer = cross_attn[best_k, -1].mean(dim=0).cpu().numpy()
+#         else: # [Layers, Heads, Tgt, Src]
+#             attn_layer = cross_attn[-1].mean(dim=0).cpu().numpy()
+
+
+def draw_trajectory_attention(args, loader, generator):
+    """
+    Draw attention weights in the heat map in prediction space
+    """
+    logger.info("Drawing trajectories...")
+    generator.eval()
+    if args.shuffle:
+        loader.shuffle()
+    if hasattr(loader, 'reset'): loader.reset()
+    else: loader.index = 0
+
+    device = torch.device('cpu')  # Force CPU for testing
+    
+    # --- 1. 尋找 agent 數量 >= 3 的場景 ---
+    conn_dist = getattr(args, 'conn_dist', 100000.0)
+    batcher = SmartBatcher(loader, batch_size=1, augment=False, max_agents_limit=50, conn_dist=conn_dist)
+    batcher.reset()
+
+    found_scene = False
+    batch = None
+    
+    # Find a scene with 3 up agents
+    found_scene = False
+    batch = None
+    while batcher.has_data():
+        raw_batch = batcher.next_batch()
+        if raw_batch is None: continue
+        if len(raw_batch['pre_motion_3D']) >= 3:
+            batch = prepare_batch(raw_batch, device)
+            found_scene = True
+            break
+
+    if not found_scene:
+        print("Cant find a scene with 3 up agents, terminate...")
+        return
+
+    # --- 2. 推理與數據提取 ---
+    with torch.no_grad():
+        K = args.sample_k if hasattr(args, 'sample_k') else 10
+        # 獲取權重時 need_weights=True
+        all_preds, data_dict = generator(batch, k=K, need_weights=True)
+        # all_preds: [Agents, K, Time, 2]
+        num_agents = batch['agent_num']
+        obs_len = batch['pre_motion'].shape[0]
+        pred_len = all_preds.shape[2]
+        protagonist_idx = 0
+
+        # Compute best-k per agent (same as draw_trajectory)
+        pred_real_abs = batch['fut_motion']
+        all_preds_k = all_preds.permute(1, 2, 0, 3)  # [K, Time, Agents, 2]
+        dist = torch.norm(all_preds_k - pred_real_abs.unsqueeze(0), dim=-1)
+        ade_per_agent = dist.mean(dim=1)  # [K, Agents]
+        best_indices = torch.argmin(ade_per_agent, dim=0)  # [Agents]
+
+        # Use protagonist's best-k for attention visualization
+        best_k = int(best_indices[protagonist_idx])
+
+        # Extract cross-attention weights from the last decoder layer
+        attn_w = data_dict['attn_weights']
+        cross_attn_all = attn_w['cross_attn_weights'] # future-to-past/context attention weights
+        self_attn_all = attn_w['self_attn_weights']  # future-to-future attention weights
+        if cross_attn_all is None:
+            print("No attention weights found, terminate...")
+            return
+        # select the best k if apply k-variety
+        if cross_attn_all.ndim == 4:
+            cross_attn = cross_attn_all[-1, best_k]  # [tgt_len, src_len]
+        elif cross_attn_all.ndim == 3:
+            cross_attn = cross_attn_all[-1]
+        else:
+            cross_attn = cross_attn_all
+        if self_attn_all is None:
+            print("No self-attention weights found, terminate...")
+            return
+        if self_attn_all.ndim == 4:
+            self_attn = self_attn_all[-1, best_k]
+        elif self_attn_all.ndim == 3:
+            self_attn = self_attn_all[-1]
+        else:
+            self_attn = self_attn_all
+
+    # --- 3. Plotting (1, 2) Subplots ---
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    ax_left, ax_right = axes
+
+    past_coords = batch['pre_motion'].cpu().numpy()
+    gt_coords = batch['fut_motion'].cpu().numpy()
+    best_preds_all = np.stack(
+        [all_preds[n, best_indices[n], :, :].cpu().numpy() for n in range(num_agents)],
+        axis=0
+    )
+
+    # Left: predicted trajectories (same style as draw_trajectory)
+    for n in range(num_agents):
+        last_obs = past_coords[-1, n, :]
+        ax_left.plot(
+            past_coords[:, n, 0], past_coords[:, n, 1],
+            'b-', linewidth=2, alpha=0.7, label='Past' if n == 0 else ""
+        )
+        ax_left.scatter(past_coords[0, n, 0], past_coords[0, n, 1], c='b', s=20, marker='o')
+
+        gt_plot = np.vstack([last_obs, gt_coords[:, n, :]])
+        ax_left.plot(
+            gt_plot[:, 0], gt_plot[:, 1],
+            'g-', linewidth=2, alpha=0.5, label='GT' if n == 0 else ""
+        )
+        ax_left.scatter(gt_coords[-1, n, 0], gt_coords[-1, n, 1], c='g', s=30, marker='*')
+
+        pred_plot = np.vstack([last_obs, best_preds_all[n]])
+        ax_left.plot(
+            pred_plot[:, 0], pred_plot[:, 1],
+            'r', linewidth=2, color='darkred', label='Best Pred' if n == 0 else ""
+        )
+
+    ax_left.set_title(f"Predicted Trajectories (N={num_agents})")
+    ax_left.axis('equal')
+    ax_left.legend(loc='upper center', bbox_to_anchor=(0.5, 1.22), ncol=3, frameon=False)
+
+    # Right: attention heatmap scatter (past + forecast points)
+    t_step = pred_len - 1
+    tgt_seq_idx = t_step * num_agents + protagonist_idx
+    src_len = cross_attn.shape[-1]
+    obs_len_attn = src_len // num_agents if src_len % num_agents == 0 else obs_len
+    obs_len_plot = min(obs_len, obs_len_attn)
+    attn_flat_past = cross_attn[tgt_seq_idx]
+    attn_past = attn_flat_past.reshape(obs_len_attn, num_agents)[:obs_len_plot, :]
+
+    attn_flat_future = self_attn[tgt_seq_idx]
+    attn_future = attn_flat_future.reshape(pred_len, num_agents)
+
+    max_weight = max(float(attn_past.max()), float(attn_future.max()), 1e-8)
+    attn_past = attn_past / max_weight
+    attn_future = attn_future / max_weight
+
+    # Draw trajectories and colored points
+    for n in range(num_agents):
+        traj_x = np.concatenate([past_coords[:, n, 0], best_preds_all[n, :, 0]])
+        traj_y = np.concatenate([past_coords[:, n, 1], best_preds_all[n, :, 1]])
+        ax_right.plot(traj_x, traj_y, color='gray', alpha=0.3, linewidth=1)
+
+    past_plot = past_coords[:obs_len_plot]
+    past_x = past_plot[:, :, 0].reshape(-1)
+    past_y = past_plot[:, :, 1].reshape(-1)
+    past_c = attn_past.reshape(-1)
+    future_x = best_preds_all[:, :, 0].reshape(-1)
+    future_y = best_preds_all[:, :, 1].reshape(-1)
+    future_c = attn_future.T.reshape(-1)
+
+    scatter_past = ax_right.scatter(past_x, past_y, c=past_c, cmap='Blues', s=60, alpha=0.9)
+    scatter_future = ax_right.scatter(future_x, future_y, c=future_c, cmap='Greens', s=60, alpha=0.9)
+    ax_right_pos = ax_right.get_position()
+    bar_height = ax_right_pos.height * 0.03
+    bar_width = ax_right_pos.width * 0.42
+    bar_y0 = ax_right_pos.y1 + 0.02
+    cax_past = fig.add_axes([
+        ax_right_pos.x0 + ax_right_pos.width * 0.05,
+        bar_y0,
+        bar_width,
+        bar_height
+    ])
+    cax_future = fig.add_axes([
+        ax_right_pos.x0 + ax_right_pos.width * 0.53,
+        bar_y0,
+        bar_width,
+        bar_height
+    ])
+    fig.colorbar(scatter_past, cax=cax_past, orientation='horizontal')
+    fig.colorbar(scatter_future, cax=cax_future, orientation='horizontal')
+    cax_past.set_xlabel('Past')
+    cax_future.set_xlabel('Future')
+    cax_past.xaxis.set_label_position('top')
+    cax_future.xaxis.set_label_position('top')
+    cax_past.tick_params(axis='x', labelsize=8, pad=1)
+    cax_future.tick_params(axis='x', labelsize=8, pad=1)
+
+    # Highlight protagonist's predicted last position
+    ax_right.scatter(
+        best_preds_all[protagonist_idx, t_step, 0],
+        best_preds_all[protagonist_idx, t_step, 1],
+        color='red', marker='*', s=180, zorder=5
+    )
+
+    ax_right.set_title(f"Cross-Attention Heatmap (Protagonist A{protagonist_idx})")
+    attention_handles = [
+        plt.Line2D([0], [0], marker='o', linestyle='None', color='tab:blue', markersize=8, label='Attention to Past'),
+        plt.Line2D([0], [0], marker='o', linestyle='None', color='tab:green', markersize=8, label='Attention to Future'),
+        plt.Line2D([0], [0], marker='o', linestyle='None', color='red', markersize=8, label='Target (Being Predicted)')
+    ]
+    ax_right.legend(handles=attention_handles, loc='upper center', bbox_to_anchor=(0.5, 1.34), ncol=3, frameon=False)
+    ax_right.set_aspect('equal', adjustable='box')
+
+    fig.subplots_adjust(top=0.78, wspace=0.25)
+    os.makedirs(args.output_dir, exist_ok=True)
+    save_path = os.path.join(args.output_dir, 'trajectory_attention.png')
+    plt.savefig(save_path)
+    plt.show()
+    print(f"Visualization saved to: {save_path}")
+    
+
+
+
 def main(args):
     global logger
     
@@ -190,7 +437,7 @@ def main(args):
     }
     args.future_decoder = {
         'nlayer': args.dec_layers,
-        'out_mlp_dim': [256, 128],
+        'out_mlp_dim': [512, 256],
         'input_type': [args.input_type]
     }
 
@@ -224,6 +471,11 @@ def main(args):
     if args.draw:
         draw_trajectory(args, test_gen, generator)
         return
+
+    if args.draw_attn:
+        draw_trajectory_attention(args, test_gen, generator)
+        return
+
     # --- Run Evaluation ---
     ade, fde = evaluate(args, test_gen, generator)
     
@@ -246,6 +498,8 @@ if __name__ == '__main__':
     parser.add_argument('--draw', default=False, action='store_true', help='Draw trajectory (default: False)')
     parser.add_argument('--draw_k', default=False, action='store_true', help='Draw all K trajectories in visualization (default: False, only draws best prediction)')
     parser.add_argument('--draw_pt', default=False, action='store_true', help='Draw per-timestep points for GT and best prediction (default: False)')
+    
+    parser.add_argument('--draw_attn', default=False, action='store_true', help='Turn on mode to draw attention weights (default: False)')
     
     # --- Evaluation Params ---
     # Dataset args (dataset, data_root_ethucy, data_root_nuscenes_pred) are loaded from config_saved.yaml
