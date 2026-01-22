@@ -5,8 +5,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from .agentformer_lib import (AgentFormerEncoderLayer, AgentFormerDecoderLayer,AgentFormerEncoder, AgentFormerDecoder,)
-from .agentformer import PositionalAgentEncoding, ContextEncoder, FutureDecoder
+from .agentformer import PositionalAgentEncoding, ContextEncoder, FutureDecoder, FutureEncoder
 from torch.nn.utils import spectral_norm
+from .common.dist import *
 
 
 def get_noise(shape, noise_type='gaussian', device='cpu'):
@@ -97,19 +98,21 @@ class AgentFormerGenerator(nn.Module):
         # B. Future Decoder (Processes Context C + Noise Z -> Future Y)
         self.future_decoder = FutureDecoder(cfg.future_decoder, self.ctx)
 
-    def forward(self, data, z=None, k=1, need_weights=False):
+    def forward(self, data, z=None, k=1, need_weights=False, pre_compute_context=False):
         """
         Args:
             data: Dictionary containing 'pre_motion', 'agent_mask', etc.
             z: Latent noise vector [Batch_Size, agent_num, nz]. 
                If None, it is sampled from N(0,1).
             k: Number of samples to generate for Best-of-K evaluation.
+            pre_compute_context: If True, skip context encoding. (for BiGAT latent encoder)
         Returns:
             pred_fake: The generated future trajectories.
         """
         
         # 1. Encode Past: This populates data['context_enc'] and data['agent_context']
-        self.context_encoder(data)
+        if not pre_compute_context:
+            self.context_encoder(data)
 
         # 2. Handle Latent Noise (Z)
         if self.use_cvae and self.training:
@@ -117,7 +120,11 @@ class AgentFormerGenerator(nn.Module):
             # This populates data['q_z_dist'] and data['q_z_samp']
             self.future_encoder(data)
             z = data['q_z_samp']
-
+        # else:
+        #     if z is None:
+        #         # Sample k samples of standard gaussian noise for GAN
+        #         z = torch.randn(data['agent_num']*k, self.cfg.nz).to(data['pre_motion'].device)
+        
         # 3. Decode Future (Generation) by x^{T} and latent vector
         # We use mode='infer' to generate future trajectories from the latent noise z
         # 'sample_num' is usually 1 for GAN training (1-to-1 mapping of Z to Y)
@@ -161,13 +168,7 @@ class AgentFormerDiscriminator(nn.Module):
 
         # 4. The Transformer Backbone (AgentFormer Encoder)
         # We construct this manually using the Lib
-        encoder_layers = AgentFormerEncoderLayer(
-            getattr(cfg, 'tf_cfg', {}), 
-            self.model_dim, 
-            self.nhead, 
-            self.ff_dim, 
-            self.dropout
-        )
+        encoder_layers = AgentFormerEncoderLayer(getattr(cfg, 'tf_cfg', {}), self.model_dim, self.nhead, self.ff_dim, self.dropout)
         self.tf_encoder = AgentFormerEncoder(encoder_layers, self.nlayer)
 
         # 5. Final Classifier (MLP)
@@ -193,12 +194,12 @@ class AgentFormerDiscriminator(nn.Module):
 
         # 1. Concatenate History and Future along Time Dimension
         # future = future.permute(1, 0, 2)
-        # Concatenate: [Total_Len, Total_Agents, 2]
+        # Concatenate: [Time, Total_Agents, 2]
         full_traj = torch.cat([history, future], dim=0)
         seq_len, batch_size, _ = full_traj.shape
         
         # 2. Input Projection
-        # Flatten to [Batch*Total_Len, Input_Dim] for Linear Layer
+        # Flatten to [Batch*Time, Input_Dim] for Linear Layer
         tf_in = self.input_fc(full_traj.view(-1, self.input_dim))
         
         # Reshape to [Total_Len*Batch, 1, Model_Dim] for Encoder
@@ -228,6 +229,54 @@ class AgentFormerDiscriminator(nn.Module):
         score = self.out_mlp(pooled_feature)
         
         return score
+
+
+class BiGATLatentEncoder(FutureEncoder):
+    """
+    agentformer based latent encoder for S BiGAN
+    """
+    def __init__(self, cfg, ctx, **kwargs):
+        super().__init__(cfg, ctx, **kwargs)
+
+    def forward(self, traj_in, context_enc, agent_mask, agent_num):
+        """
+        (Rewrtie the forward method to fit the BiGAN latent encoder)
+        Args:
+            traj_in: [Time, Agents, 2] - (Real or Fake)  // or [Batch, Fut_Len, 2]?
+            context_enc: [Agents, Dim] - encoding of past trajectories
+            agent_mask: [Agents, Agents]
+        """
+        # 1. 構建 Input Projection
+        # Use reshape to handle non-contiguous tensors (e.g., after permute)
+        tf_in = self.input_fc(traj_in.reshape(-1, traj_in.shape[-1])).view(-1, 1, self.model_dim)
+        
+        # 2. Positional Encoding
+        tf_in_pos = self.pos_encoder(tf_in, num_a=agent_num)
+        
+        # 3. Mask Generation
+        mem_mask = generate_mask(tf_in.shape[0], context_enc.shape[0], agent_num, agent_mask).to(tf_in.device)
+        tgt_mask = generate_mask(tf_in.shape[0], tf_in.shape[0], agent_num, agent_mask).to(tf_in.device)
+
+        # 4. Transformer Decoder (這裡其實是 Encoder 的角色)
+        tf_out, _ = self.tf_decoder(tf_in_pos, context_enc, memory_mask=mem_mask, tgt_mask=tgt_mask, num_agent=agent_num)
+        tf_out = tf_out.view(traj_in.shape[0], -1, self.model_dim)
+
+        # 5. Pooling & Predict Z
+        if self.pooling == 'mean':
+            h = torch.mean(tf_out, dim=0)
+        else:
+            h = torch.max(tf_out, dim=0)[0]
+            
+        if self.out_mlp_dim is not None:
+            h = self.out_mlp(h)
+            
+        q_z_params = self.q_z_net(h)
+        
+        # 回傳分佈參數 (mu, logvar) 或者直接回傳 Distribution 物件
+        if self.z_type == 'gaussian':
+            return Normal(params=q_z_params)
+        else:
+            return Categorical(logits=q_z_params, temp=self.z_tau_annealer.val())
 
 
 if __name__ == '__main__':

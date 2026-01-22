@@ -3,7 +3,7 @@ from torch import distributions as td
 
 
 class Normal:
-
+    """to help keep gradients flowing through mu and sigma during training"""
     def __init__(self, mu=None, logvar=None, params=None):
         super().__init__()
         if params is not None:

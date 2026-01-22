@@ -1,0 +1,60 @@
+# --- Data Parameters ---
+dataset: 'eth'
+data_root_ethucy: 'datasets/eth_ucy'
+traj_scale: 1
+past_frames: 8
+future_frames: 12
+min_past_frames: 8
+min_future_frames: 12
+frame_skip: 1
+phase: 'training'
+augment: 1
+centered: 1
+conn_dist: 100000.0
+
+# --- Optimization ---
+batch_size: 16
+num_epochs: 30
+best_k: 10
+g_learning_rate: 0.0001
+d_learning_rate: 0.0001
+clipping_threshold_g: 1.0
+clipping_threshold_d: 1.0
+
+# --- Learning Rate Scheduler ---
+scheduler_type: 'exponential'
+scheduler_step_size: null
+scheduler_gamma: null
+scheduler_min_lr: 0
+scheduler_patience: 10
+scheduler_factor: 0.5
+
+# --- Model Architecture ---
+enc_layers: 2
+dec_layers: 2
+input_type: 'pos'
+motion_dim: 2
+forecast_dim: 2
+tf_model_dim: 256
+tf_nhead: 8
+tf_ff_dim: 512
+tf_dropout: 0.15
+pos_concat: true
+nz: 32
+z_type: 'gaussian'
+noise_std: 0.0
+
+# --- CVAE Control ---
+kl_weight: 1.0
+l2_loss_weight: 0.5
+
+# --- Output ---
+output_dir: './checkpoints/eth_bisgan3A'
+print_every: 50
+checkpoint_every: 1000
+checkpoint_name: 'eth_bisgan3A'
+restore_from_checkpoint: 0
+checkpoint_start_from: null
+num_samples_check: 500
+use_gpu: 1
+gpu_num: "0"

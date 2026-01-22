@@ -26,7 +26,7 @@ if scripts_dir not in sys.path:
 
 # Import Data Generator (The Iterator based one)
 from model.data.dataloader import data_generator, data_loader
-from model.sgan3A import AgentFormerGenerator, AgentFormerDiscriminator
+from model.sgan3A import AgentFormerGenerator, AgentFormerDiscriminator, BiGATLatentEncoder
 from model.losses import gan_g_loss, gan_d_loss, l2_loss, select_best_k_scene
 from model.losses import g_hinge_loss, d_hinge_loss # new
 from utils.logger import Logger
@@ -85,13 +85,11 @@ parser.add_argument('--best_k', default=10, type=int, help='Number of samples fo
 
 parser.add_argument('--g_learning_rate', default=1e-4, type=float)
 parser.add_argument('--d_learning_rate', default=1e-4, type=float)
-parser.add_argument('--g_steps', default=1, type=int)
-parser.add_argument('--d_steps', default=2, type=int)
+# parser.add_argument('--g_steps', default=1, type=int)
+# parser.add_argument('--d_steps', default=2, type=int)
 parser.add_argument('--clipping_threshold_g', default=0, type=float)
 parser.add_argument('--clipping_threshold_d', default=0, type=float)
-parser.add_argument('--k', default=1, type=int, help='Number of samples for Variety Loss')
-parser.add_argument('--warmup_epochs', default=3, type=int, help='Number of epochs to train G only on L2 loss')
-parser.add_argument('--resume_warmup_from', default=None, type=str, help='Path to pre-trained warm-up model')
+# parser.add_argument('--k', default=1, type=int, help='Number of samples for Variety Loss')
 
 # --- Learning Rate Scheduler ---
 parser.add_argument('--scheduler_type', default='none', type=str,
@@ -124,7 +122,7 @@ parser.add_argument('--input_type', default='pos', type=str) # 'pos' or 'vel'
 parser.add_argument('--noise_std', default=0.0, type=float, help='Add Gaussian noise for future trajectories in Discriminator(default: 0.0). Will decay in 20 epochs to 0.05.')
 
 # --- CVAE Control ---
-parser.add_argument('--use_cvae', default=0, type=int, help='1 to enable CVAE (KL loss), 0 for Pure GAN')
+# parser.add_argument('--use_cvae', default=0, type=int, help='1 to enable CVAE (KL loss), 0 for Pure GAN')
 parser.add_argument('--kl_weight', default=1.0, type=float)
 parser.add_argument('--l2_loss_weight', default=1.0, type=float)
 
@@ -138,6 +136,7 @@ parser.add_argument('--checkpoint_start_from', default=None)
 parser.add_argument('--num_samples_check', default=500, type=int)
 parser.add_argument('--use_gpu', default=1, type=int)
 parser.add_argument('--gpu_num', default="0", type=str)
+
 
 def main(args):
     if not os.path.exists(args.output_dir):
@@ -192,12 +191,11 @@ def main(args):
         'input_type': [args.input_type]
     }
     
-    # Also needed if using CVAE mode
-    # args.future_encoder = {
-    #     'nlayer': args.enc_layers,
-    #     'out_mlp_dim': [512, 256],
-    #     'input_type': [args.input_type]
-    # }
+    args.future_encoder = {
+        'nlayer': args.enc_layers,
+        'out_mlp_dim': [512, 256],
+        'input_type': [args.input_type]
+    }
 
     # We pass 'args' as 'cfg' to the models
     generator = AgentFormerGenerator(args).to(device)
@@ -205,6 +203,10 @@ def main(args):
     
     discriminator = AgentFormerDiscriminator(args).to(device)
     discriminator.apply(init_weights)
+
+    # Latent Encoder
+    latent_encoder = BiGATLatentEncoder(args.future_encoder, generator.ctx).to(device)
+    latent_encoder.apply(init_weights)  
 
     logger.info("------------- Generator Architecture -------------")
     logger.info(str(generator))
@@ -214,7 +216,13 @@ def main(args):
     logger.info(str(discriminator))
     logger.info("--------------------------------------------------")
 
-    optimizer_g = optim.Adam(generator.parameters(), lr=args.g_learning_rate)
+    logger.info("----------- Latent Encoder Architecture -----------")
+    logger.info(str(latent_encoder))
+    logger.info("---------------------------------------------------")
+
+    optimizer_g = optim.Adam(
+        list(generator.parameters()) + list(latent_encoder.parameters()),
+        lr=args.g_learning_rate)
     optimizer_d = optim.Adam(discriminator.parameters(), lr=args.d_learning_rate)
 
     # --- Initialize Learning Rate Schedulers ---
@@ -241,6 +249,7 @@ def main(args):
         'g_state': None,
         'g_optim_state': None,
         'g_scheduler_state': None,
+        'e_state': None,
         'd_state': None,
         'd_optim_state': None,
         'd_scheduler_state': None,
@@ -261,6 +270,8 @@ def main(args):
         checkpoint = torch.load(restore_path, map_location=device, weights_only=False)
         generator.load_state_dict(checkpoint['g_state'])
         discriminator.load_state_dict(checkpoint['d_state'])
+        if 'e_state' in checkpoint and checkpoint['e_state'] is not None:
+            latent_encoder.load_state_dict(checkpoint['e_state'])
         optimizer_g.load_state_dict(checkpoint['g_optim_state'])
         optimizer_d.load_state_dict(checkpoint['d_optim_state'])
         
@@ -282,16 +293,6 @@ def main(args):
         epoch = 0
         best_ade = float('inf') # Keep for backward compatibility
         best_ade_fde = float('inf')
-    
-    if args.resume_warmup_from and os.path.isfile(args.resume_warmup_from):
-        logger.info(f"Loading pre-trained warm-up model from: {args.resume_warmup_from}")
-        warm_checkpoint = torch.load(args.resume_warmup_from, map_location='cpu', weights_only=False)
-    
-        generator.load_state_dict(warm_checkpoint['g_state'])
-        discriminator.load_state_dict(warm_checkpoint['d_state'])
-        del warm_checkpoint
-    
-        args.warmup_epochs = 0
 
     # --- Initialize Data Generator ---
     logger.info("Initializing Data Generator...")
@@ -325,17 +326,12 @@ def main(args):
     # Main training loop
     while epoch < args.num_epochs:
         epoch += 1
-        # train_gen.shuffle()
         batcher.reset()
 
         logger.info(f'Starting epoch {epoch}')
-        is_warmup = epoch <= args.warmup_epochs
-        if is_warmup:
-            logger.info(f"WARMUP PHASE: Training Generator Only (Epoch {epoch}/{args.warmup_epochs})")
         
         # Initialize epoch accumulators for losses
-        epoch_d_losses = defaultdict(list)
-        epoch_g_losses = defaultdict(list)
+        epoch_losses = defaultdict(list)
         batch_count = 0
 
         # 0107 ADD: noise_std
@@ -343,80 +339,82 @@ def main(args):
         logger.info(f"Current noise std: {current_noise_std}")
 
         while batcher.has_data():
-        # for itr in range(iterations_per_epoch):
-        #     raw_batch = fetch_and_collate_batch(train_gen, args.batch_size, augment=args.augment)
             raw_batch = batcher.next_batch()
-            if raw_batch is None: 
-                continue
+            if raw_batch is None: continue
                 
             # 2. Convert to Tensors
             batch = prepare_batch(raw_batch, device)
             
-            # 3. Optimization
-            if not is_warmup:
-                for _ in range(args.d_steps):
-                    # losses_d = discriminator_step(args, batch, generator, discriminator, gan_d_loss, optimizer_d, scaler, device, current_noise_std)
-                    losses_d = discriminator_step(args, batch, generator, discriminator, d_hinge_loss, optimizer_d, scaler, device, current_noise_std)
-            else:
-                losses_d = {'D_loss': 0.0}
-            
-            for _ in range(args.g_steps):
-                # losses_g = generator_step(args, batch, generator, discriminator, gan_g_loss, optimizer_g, scaler, device, is_warmup, current_noise_std)
-                losses_g = generator_step(args, batch, generator, discriminator, g_hinge_loss, optimizer_g, scaler, device, is_warmup, current_noise_std)
-            
+            # 3. Optimization    
+            step_losses = biGAN_step(
+                args, batch, generator, discriminator, latent_encoder, 
+                gan_d_loss, gan_g_loss,         #d_hinge_loss, g_hinge_loss, 
+                optimizer_g, optimizer_d, scaler, device)
+
             t += 1
             batch_count += 1
-
-            # Accumulate losses for epoch average
-            for k, v in losses_d.items():
-                epoch_d_losses[k].append(v)
-            for k, v in losses_g.items():
-                epoch_g_losses[k].append(v)
 
             # Console logging (every print_every iterations)
             if t % args.print_every == 0:
                 log_str = f'[Ep {epoch}][Iter {t}] '
-                log_str += f'D_loss: {losses_d["D_loss"]:.4f} '
-                log_str += f'| G_adv: {losses_g["G_adv"]:.4f} '
-                log_str += f'| G_l2: {losses_g["G_l2"]:.4f} '
-                if args.use_cvae:
-                    log_str += f'| G_kl: {losses_g.get("G_kl", 0):.4f}'
+                log_str += f'D_rand: {step_losses["D_rand"]:.4f}'
+                log_str += f'| G_rand: {step_losses["G_rand"]:.4f}|'
+                log_str += f'| D_rec: {step_losses["D_rec"]:.4f} '
+                log_str += f'| G_rec: {step_losses["G_rec"]:.4f} '
+                log_str += f'| G_l2: {step_losses["G_l2"]:.4f} '
+                log_str += f'| L_z: {step_losses["L_z"]:.4f} '
+                log_str += f'| L_kl: {step_losses["L_kl"]:.4f} '
                 logger.info(log_str)
-    
+
+            # Collect step losses for log (key->to list of step losses)
+            for k, v in step_losses.items():
+                epoch_losses[k].append(v)
+
+        # ==========================================
+        # End of Epoch: Process & Save Logs
+        # ==========================================
         # --- SAVE EPOCH AVERAGE, MIN, MAX LOSSES TO HISTORY ---
         if batch_count > 0:
-            for k in epoch_d_losses:
-                loss_values = epoch_d_losses[k]
-                avg_loss = np.mean(loss_values)
-                min_loss = np.min(loss_values)
-                max_loss = np.max(loss_values)
-                checkpoint['D_losses'][k].append(avg_loss)
-                checkpoint['D_losses'][f'{k}_min'].append(min_loss)
-                checkpoint['D_losses'][f'{k}_max'].append(max_loss)
-            for k in epoch_g_losses:
-                loss_values = epoch_g_losses[k]
-                avg_loss = np.mean(loss_values)
-                min_loss = np.min(loss_values)
-                max_loss = np.max(loss_values)
-                checkpoint['G_losses'][k].append(avg_loss)
-                checkpoint['G_losses'][f'{k}_min'].append(min_loss)
-                checkpoint['G_losses'][f'{k}_max'].append(max_loss)
-            checkpoint['losses_ts'].append(epoch)  # Use epoch number instead of iteration
+            log_summary_parts = [f'[Epoch {epoch} Summary]']
+            
+            for k, v_list in epoch_losses.items():
+                avg_val = np.mean(v_list)
+                min_val = np.min(v_list)
+                max_val = np.max(v_list)
+
+                # Store raw training losses (all keys from biGAN_step)
+                checkpoint['metrics_train'][k].append(avg_val)
+                checkpoint['metrics_train'][f'{k}_min'].append(min_val)
+                checkpoint['metrics_train'][f'{k}_max'].append(max_val)
+
+                # Legacy keys for plotting/compatibility (stage 1 losses)
+                if k == 'D_rand':
+                    checkpoint['D_losses']['D_loss'].append(avg_val)
+                    checkpoint['D_losses']['D_loss_min'].append(min_val)
+                    checkpoint['D_losses']['D_loss_max'].append(max_val)
+                if k == 'G_rand':
+                    checkpoint['G_losses']['G_adv'].append(avg_val)
+                    checkpoint['G_losses']['G_adv_min'].append(min_val)
+                    checkpoint['G_losses']['G_adv_max'].append(max_val)
+                if k == 'G_l2':
+                    checkpoint['G_losses']['G_l2'].append(avg_val)
+                    checkpoint['G_losses']['G_l2_min'].append(min_val)
+                    checkpoint['G_losses']['G_l2_max'].append(max_val)
+
+                # get avg loss for log
+                if k in ['D_rand', 'D_rec', 'G_rand', 'G_rec', 'G_l2', 'L_z', 'L_kl']:
+                    log_summary_parts.append(f'{k}: {avg_val:.4f}')
+
+            checkpoint['losses_ts'].append(epoch)
+            logger.info(" | ".join(log_summary_parts))
             
             # Log epoch summary
             log_str = f'[Epoch {epoch} Summary] '
-            if 'D_loss' in epoch_d_losses:
-                log_str += f'Avg D_loss: {np.mean(epoch_d_losses["D_loss"]):.4f} '
-            if 'G_adv' in epoch_g_losses:
-                log_str += f'| Avg G_adv: {np.mean(epoch_g_losses["G_adv"]):.4f} '
-            if 'G_l2' in epoch_g_losses:
-                log_str += f'| Avg G_l2: {np.mean(epoch_g_losses["G_l2"]):.4f} '
-            if args.use_cvae and 'G_kl' in epoch_g_losses:
-                log_str += f'| Avg G_kl: {np.mean(epoch_g_losses["G_kl"]):.4f}'
+            
             logger.info(log_str)
 
+        # --- Validation ---
         logger.info('Checking validation...')
-        # Use k=1 for fast validation during training (can be increased for more accurate metrics)
         val_metrics = check_accuracy(args, val_gen, generator, limit=True, k=20, augment=False)
         logger.info(f'[Val] ADE: {val_metrics["ade"]:.4f} | FDE: {val_metrics["fde"]:.4f}')
         
@@ -425,9 +423,8 @@ def main(args):
             checkpoint['metrics_val'][k].append(v)
         checkpoint['sample_ts'].append(epoch)  # Use epoch number instead of iteration
 
-        # --- STEP LEARNING RATE SCHEDULERS ---
+        # --- LEARNING RATE SCHEDULERS ---
         # Only step schedulers after at least one optimizer step has been performed
-        # This prevents the warning about calling scheduler.step() before optimizer.step()
         if batch_count > 0:
             # Step ReduceLROnPlateau schedulers based on validation metric
             if scheduler_g is not None:
@@ -442,24 +439,31 @@ def main(args):
                 elif args.scheduler_type in ['step', 'exponential', 'cosine']:
                     scheduler_d.step()
         
-        # Log current learning rates
-        current_lr_g = optimizer_g.param_groups[0]['lr']
-        current_lr_d = optimizer_d.param_groups[0]['lr']
-        logger.info(f'Current LR - G: {current_lr_g:.2e}, D: {current_lr_d:.2e}')
+        # # Log current learning rates
+        # current_lr_g = optimizer_g.param_groups[0]['lr']
+        # current_lr_d = optimizer_d.param_groups[0]['lr']
+        # logger.info(f'Current LR - G: {current_lr_g:.2e}, D: {current_lr_d:.2e}')
 
-        # --- CLEAN ARGS (Fix Pickle Error) ---
-        saved_args = vars(args).copy()
-        if 'get' in saved_args: del saved_args['get']
+        # # --- CLEAN ARGS (Fix Pickle Error) ---
+        # saved_args = vars(args).copy()
+        # if 'get' in saved_args: del saved_args['get']
         
-        # Update State
+        # Update State 
+        # checkpoint['args'] = saved_args
+        # Save args for checkpoint inspection/compatibility
+        saved_args = vars(args).copy()
+        if 'get' in saved_args:
+            del saved_args['get']
         checkpoint['args'] = saved_args
+
         checkpoint['counters']['t'] = t
         checkpoint['counters']['epoch'] = epoch
         checkpoint['g_state'] = generator.state_dict()
         checkpoint['g_optim_state'] = optimizer_g.state_dict()
         checkpoint['d_state'] = discriminator.state_dict()
         checkpoint['d_optim_state'] = optimizer_d.state_dict()
-        
+        checkpoint['e_state'] = latent_encoder.state_dict()
+
         # Save scheduler states
         checkpoint['g_scheduler_state'] = scheduler_g.state_dict() if scheduler_g is not None else None
         checkpoint['d_scheduler_state'] = scheduler_d.state_dict() if scheduler_d is not None else None
@@ -485,137 +489,130 @@ def main(args):
                 logger.warning(f'Failed to plot training curves: {e}')
 
 
-def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimizer_d, scaler, device):
+def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn, g_loss_fn, optimizer_g, optimizer_d, scaler, device):
     losses = {}
+    optimizer_g.zero_grad()
     optimizer_d.zero_grad()
 
-    # 1. Forward & Loss
-    # with torch.amp.autocast('cuda'):
-    # with torch.cuda.amp.autocast(enabled=(args.device.type == 'cuda')):
+    # ==================================================================
+    # 1. Update Discriminator (D)
+    # ==================================================================
     with torch.cuda.amp.autocast(enabled=False):
-        # Generate Fake (Detach to stop gradients to Generator)
-        with torch.no_grad():
-            pred_fake_abs, _ = generator(batch) 
-            pred_fake_abs = pred_fake_abs.permute(1, 0, 2).detach()
+        # --- Stage 1 D: traj generate from Random Noise (Stage 1: z_rand -> G -> Fake) ---
 
-        # Get Real Data
-        pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
+        # get real score
+        pred_real = batch['fut_motion']
+        score_real = discriminator(batch['pre_motion'], pred_real, batch['agent_mask'], batch['agent_num'])
         
-        # Discriminator Forward
-        scores_fake = discriminator(batch['pre_motion'], pred_fake_abs, batch['agent_mask'], batch['agent_num'], args.noise_std)
-        scores_real = discriminator(batch['pre_motion'], pred_real_abs, batch['agent_mask'], batch['agent_num'], args.noise_std)
+        # get fake score
+        z_rand = torch.randn(batch['agent_num'], args.nz).to(device)
+        with torch.no_grad():
+            # Generate fake trajectory from Random Noise
+            pred_fake_rand, _ = generator(batch, z=z_rand) # pred_fake_rand: [Agents, time, 2]
+            pred_fake_rand = pred_fake_rand.permute(1, 0, 2).detach() # [Time, Agents, 2]
 
-        # Compute Loss
-        loss = d_loss_fn(scores_real, scores_fake)
-        losses['D_loss'] = loss.item()
+            # Generate fake trajectory from noise encoded by Latent Encoder
+            generator.context_encoder(batch)
+            dist_real = latent_encoder(
+                traj_in=batch['fut_motion'], 
+                context_enc=batch['context_enc'],
+                agent_mask=batch['agent_mask'], 
+                agent_num=batch['agent_num']
+            )
+            z_rec = dist_real.sample()
+            pred_rec, _ = generator(batch, z=z_rec)
+            pred_rec = pred_rec.permute(1, 0, 2).detach()
+        
+        score_fake_rand = discriminator(batch['pre_motion'], pred_fake_rand, batch['agent_mask'], batch['agent_num'])
+        score_fake_rec = discriminator(batch['pre_motion'], pred_rec, batch['agent_mask'], batch['agent_num'])
 
-    # 3. Backward with Scaler
-    scaler.scale(loss).backward()
-    
-    # 4. Gradient Clipping (must unscale first)
+        # --- Compute Full D Loss ---
+        # BiGAT Discriminator Loss = log(D(real)) + log(1-D(fake_rand)) + log(1-D(fake_rec))
+        ld_rand = d_loss_fn(score_real, score_fake_rand)
+        ld_rec = d_loss_fn(score_real, score_fake_rec)
+        loss_d = ld_rand + ld_rec
+        # losses['D_loss'] = loss_d.item()
+        losses['D_rand'] = ld_rand.item()
+        losses['D_rec'] = ld_rec.item()
+
+    scaler.scale(loss_d).backward()
     if args.clipping_threshold_d > 0:
         scaler.unscale_(optimizer_d)
         nn.utils.clip_grad_norm_(discriminator.parameters(), args.clipping_threshold_d)
-    
-    # 5. Optimizer Step with Scaler
     scaler.step(optimizer_d)
     scaler.update()
 
-    return losses
-
-
-def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g, scaler, device, is_warmup=False, noise_std=0.0):
-    """
-    Generator optimization step with optional Best-of-K (Variety Loss).
-    
-    Args:
-        k (int): Number of samples to generate for Variety Loss. 
-                 If k=1, standard GAN training.
-                 If k>1, minimizes L2 error of the best sample among k generations.
-    """
-    losses = {}
-    k = args.k
-    
-    optimizer_g.zero_grad()
-
+    # ==================================================================
+    # 2. Update Generator (G) and Latent Encoder (E)
+    # ==================================================================
     with torch.cuda.amp.autocast(enabled=False):
-        loss = torch.zeros(1, device=device)
+        # pre-compute context encoding
+        generator.context_encoder(batch)
+        ctx_enc = batch['context_enc']
+
+        # -------------------------------------------------------------
+        # Stage 1: z_rand -> G -> Fake
+        # -------------------------------------------------------------
+        # Gan loss for G
+        pred_rand, _ = generator(batch, z=z_rand, pre_compute_context=True)  # pred_rand: [Agents, time, 2]
+        pred_rand = pred_rand.permute(1, 0, 2)
+
+        score_fake_rand = discriminator(batch['pre_motion'], pred_rand, batch['agent_mask'], batch['agent_num']) # stage 1
+        loss_gan1 = g_loss_fn(score_fake_rand)
+
+        # L_z = |E(Y_hat)-z|
+        dist_fake = latent_encoder(
+            traj_in=pred_rand,
+            context_enc=ctx_enc.detach(),
+            agent_mask=batch['agent_mask'],
+            agent_num=batch['agent_num']
+        )
+        z_rec_mu = dist_fake.mu
+        loss_z = torch.abs(z_rec_mu - z_rand).mean()
+
+        # -------------------------------------------------------------
+        # Stage 2: z_real -> G -> Fake
+        # -------------------------------------------------------------
+        # A. Encode GT to Z
+        dist_real = latent_encoder(
+            traj_in=batch['fut_motion'],
+            context_enc=ctx_enc,
+            agent_mask=batch['agent_mask'],
+            agent_num=batch['agent_num']
+        )
+        z_real = dist_real.rsample()
+
+        # KL loss for this distribution
+        loss_kl = dist_real.kl(p=None).sum(dim=-1).mean()
         
-        # Ground Truth & Pre-processing
-        # 1. Convert GT to [Batch, Time, 2] for unified calculation
-        pred_real_norm = batch['fut_motion'].permute(1, 0, 2) 
-        
-        # 2. Prepare current position for restoration (Residual Connection)
-        # [Batch, 2] -> [Batch, 1, 2] (convenient for broadcasting addition to Time dimension)
-        # agent_current_pos = batch['agent_current_pos'].unsqueeze(1) 
-        
+        # traj reconstruction loss (l2 loss)
+        pred_rec, _ = generator(batch, z=z_real, pre_compute_context=True)
+        pred_rec = pred_rec.permute(1, 0, 2)
+
         loss_mask = batch.get('fut_mask', None)
         if loss_mask is not None:
             # [Time, agents] -> 
             loss_mask = loss_mask.transpose(0, 1)   # [agents, Time]
 
-        # --- Forward Generator ---
-        if k == 1:
-            pred_fake_offset, data_dict = generator(batch) # Output: [agents, time, 2]
-            
-            # Restore coordinates: [Batch, 1, 2] + [Batch, Time, 2]
-            pred_fake_norm = pred_fake_offset  #+  agent_current_pos
-            
-            best_pred_fake = pred_fake_norm
-            best_data_dict = data_dict
-        else:
-            # Variety Loss Logic (Best-of-K)
-            stack_preds, data_dicts_k = generator(batch, k=k)  # Output: [agents, K, time, 2]
-            stack_preds = stack_preds.permute(1, 0, 2, 3) # [K, Agents, Time, 2]
-
-            best_pred_fake, best_l2_sum = select_best_k_scene(
-                stack_preds, 
-                pred_real_norm, 
-                batch['seq_start_end'], 
-                loss_mask
-            )
-            
-        # Normalize the loss (Equivalent to l2_loss mode='average')
         if loss_mask is not None:
-            # Divide by total number of valid time steps in the batch
-            l2 = best_l2_sum / torch.sum(loss_mask)
-        else:
-            # Divide by total elements (Agents * Time)
-            l2 = best_l2_sum / (best_pred_fake.shape[0] * best_pred_fake.shape[1])
-        loss = loss + args.l2_loss_weight * l2
+            l2 = l2_loss(pred_rec, batch['fut_motion'], loss_mask)
         losses['G_l2'] = l2.item()
 
-        
-        if args.use_cvae:
-            q_dist = best_data_dict['q_z_dist']
-            p_dist = best_data_dict['p_z_dist_infer']
-            kl = torch.distributions.kl.kl_divergence(q_dist, p_dist).sum(dim=-1).mean()
-            loss = loss + args.kl_weight * kl
-            losses['G_kl'] = kl.item()
-        # breakpoint()
-        if not is_warmup:
-            # Need: [Time, Total_Agents, 2]
-            # best_pred_fake = best_pred_fake.permute(1, 0, 2)
-            # scores_fake = discriminator(batch['pre_motion'], best_pred_fake, batch['agent_mask'], batch['agent_num'])
-            
-            # 0109 Modify: Pick random k instead of feeding best traj to D
-            random_idx = torch.randint(0, k, (1,)).item()
-            pred_fake = stack_preds[random_idx].permute(1, 0, 2)
-            scores_fake = discriminator(batch['pre_motion'], pred_fake, batch['agent_mask'], batch['agent_num'])
-            
-            loss_adv = g_loss_fn(scores_fake)
-            loss = loss + loss_adv
-            losses['G_adv'] = loss_adv.item()
-        else:
-            losses['G_adv'] = 0.0
-
-    # Backward & Step with Scaler
+        # GAN loss for G
+        score_rec = discriminator(batch['pre_motion'], pred_rec, batch['agent_mask'], batch['agent_num']) # stage 2
+        loss_gan2 = g_loss_fn(score_rec)
+ 
+        # Total loss
+        loss = loss_gan1 + loss_z + loss_gan2 + args.kl_weight * loss_kl + args.l2_loss_weight * l2
+        losses['G_rand'] = loss_gan1.item()
+        losses['G_rec'] = loss_gan2.item()
+        losses['G_l2'] = l2.item()
+        losses['L_z'] = loss_z.item()
+        losses['L_kl'] = loss_kl.item()
     scaler.scale(loss).backward()
-    
     if args.clipping_threshold_g > 0:
         scaler.unscale_(optimizer_g)
         nn.utils.clip_grad_norm_(generator.parameters(), args.clipping_threshold_g)
-        
     scaler.step(optimizer_g)
     scaler.update()
 

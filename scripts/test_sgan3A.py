@@ -251,12 +251,10 @@ def draw_trajectory_attention(args, loader, generator):
         print("Cant find a scene with 3 up agents, terminate...")
         return
 
-    # --- 2. 推理與數據提取 ---
+    # --- 2. Inference and data extraction ---
     with torch.no_grad():
         K = args.sample_k if hasattr(args, 'sample_k') else 10
-        # 獲取權重時 need_weights=True
-        all_preds, data_dict = generator(batch, k=K, need_weights=True)
-        # all_preds: [Agents, K, Time, 2]
+        all_preds, data_dict = generator(batch, k=K, need_weights=True) #[Agents, K, Time, 2]
         num_agents = batch['agent_num']
         obs_len = batch['pre_motion'].shape[0]
         pred_len = all_preds.shape[2]
@@ -340,7 +338,7 @@ def draw_trajectory_attention(args, loader, generator):
     obs_len_attn = src_len // num_agents if src_len % num_agents == 0 else obs_len
     obs_len_plot = min(obs_len, obs_len_attn)
     attn_flat_past = cross_attn[tgt_seq_idx]
-    attn_past = attn_flat_past.reshape(obs_len_attn, num_agents)[:obs_len_plot, :]
+    attn_past = attn_flat_past.reshape(obs_len_attn, num_agents)[:obs_len_plot, :] # reshape the order
 
     attn_flat_future = self_attn[tgt_seq_idx]
     attn_future = attn_flat_future.reshape(pred_len, num_agents)
