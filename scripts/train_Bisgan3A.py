@@ -345,7 +345,7 @@ def main(args):
             # 3. Optimization    
             step_losses = biGAN_step(
                 args, batch, generator, discriminator, latent_encoder, 
-                gan_d_loss, gan_g_loss,         #d_hinge_loss, g_hinge_loss, 
+                d_hinge_loss, g_hinge_loss, # gan_d_loss, gan_g_loss,         #
                 optimizer_g, optimizer_d, device)
 
             t += 1
@@ -398,16 +398,11 @@ def main(args):
                     checkpoint['G_losses']['G_l2_min'].append(min_val)
                     checkpoint['G_losses']['G_l2_max'].append(max_val)
 
-                # get avg loss for log
-                if k in ['D_rand', 'D_rec', 'G_rand', 'G_rec', 'G_l2', 'L_z', 'L_kl']:
-                    log_summary_parts.append(f'{k}: {avg_val:.4f}')
+                # get avg loss for log (all loss items)
+                log_summary_parts.append(f'{k}: {avg_val:.4f}')
 
             checkpoint['losses_ts'].append(epoch)
-            logger.info(" | ".join(log_summary_parts))
-            
-            # Log epoch summary
-            log_str = f'[Epoch {epoch} Summary] '
-            
+            log_str = f'[Epoch {epoch} Summary] ' + " | ".join(log_summary_parts[1:])
             logger.info(log_str)
 
         # --- Validation ---
