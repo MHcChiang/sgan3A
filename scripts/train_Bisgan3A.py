@@ -229,9 +229,6 @@ def main(args):
     scheduler_g = create_scheduler(optimizer_g, args.scheduler_type, args.num_epochs, args)
     scheduler_d = create_scheduler(optimizer_d, args.scheduler_type, args.num_epochs, args)
 
-    # scaler = torch.amp.GradScaler(args.device)
-    scaler = torch.cuda.amp.GradScaler(enabled=False)
-    # scaler = torch.cuda.amp.GradScaler(enabled=(args.device.type == 'cuda'))
     
     if scheduler_g is not None:
         logger.info(f'Using scheduler: {args.scheduler_type} (applied to both G and D)')
@@ -349,7 +346,7 @@ def main(args):
             step_losses = biGAN_step(
                 args, batch, generator, discriminator, latent_encoder, 
                 gan_d_loss, gan_g_loss,         #d_hinge_loss, g_hinge_loss, 
-                optimizer_g, optimizer_d, scaler, device)
+                optimizer_g, optimizer_d, device)
 
             t += 1
             batch_count += 1
@@ -489,132 +486,104 @@ def main(args):
                 logger.warning(f'Failed to plot training curves: {e}')
 
 
-def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn, g_loss_fn, optimizer_g, optimizer_d, scaler, device):
+def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn, g_loss_fn, optimizer_g, optimizer_d, device):
     losses = {}
-    optimizer_g.zero_grad()
-    optimizer_d.zero_grad()
-
+    # ==================================================================
+    # 0. Make Fake Trajectories
+    # ==================================================================  
+    # Generate fake trajectory from Random Noise and latent encoder noise
+    # From Random Noise
+    z_rand = torch.randn(batch['agent_num'], args.nz).to(device)
+    # pre-compute context encoding and generate
+    generator.context_encoder(batch)
+    ctx_enc = batch['context_enc']
+    pred_fake_rand, _ = generator(batch, z=z_rand, pre_compute_context=True) # pred_fake_rand: [Agents, time, 2]
+    pred_fake_rand = pred_fake_rand.permute(1, 0, 2) # [Time, Agents, 2]
+    
+    # From noise encoded by Latent Encoder
+    generator.context_encoder(batch)
+    dist_real = latent_encoder(
+        traj_in=batch['fut_motion'], 
+        context_enc=batch['context_enc'],
+        agent_mask=batch['agent_mask'], 
+        agent_num=batch['agent_num']
+    )
+    z_rec = dist_real.rsample()  # rsample to pass gradient
+    pred_rec, _ = generator(batch, z=z_rec, pre_compute_context=True)  # pred_rec: [Agents, time, 2]
+    pred_rec = pred_rec.permute(1, 0, 2)
+        
     # ==================================================================
     # 1. Update Discriminator (D)
     # ==================================================================
-    with torch.cuda.amp.autocast(enabled=False):
-        # --- Stage 1 D: traj generate from Random Noise (Stage 1: z_rand -> G -> Fake) ---
+    optimizer_d.zero_grad()
+    # --- Stage 1 (Stage 1: z_rand -> G -> Fake) ---
+    # Real trajectory score
+    pred_real = batch['fut_motion']
+    score_real = discriminator(batch['pre_motion'], pred_real, batch['agent_mask'], batch['agent_num'])
+    score_fake_rand = discriminator(batch['pre_motion'], pred_fake_rand.detach(), batch['agent_mask'], batch['agent_num'])
+    
+    # Stage 2 (Stage 2: z_rec -> G -> Fake)
+    score_fake_rec = discriminator(batch['pre_motion'], pred_rec.detach(), batch['agent_mask'], batch['agent_num'])
 
-        # get real score
-        pred_real = batch['fut_motion']
-        score_real = discriminator(batch['pre_motion'], pred_real, batch['agent_mask'], batch['agent_num'])
-        
-        # get fake score
-        z_rand = torch.randn(batch['agent_num'], args.nz).to(device)
-        with torch.no_grad():
-            # Generate fake trajectory from Random Noise
-            pred_fake_rand, _ = generator(batch, z=z_rand) # pred_fake_rand: [Agents, time, 2]
-            pred_fake_rand = pred_fake_rand.permute(1, 0, 2).detach() # [Time, Agents, 2]
+    # --- Compute Full D Loss ---
+    # BiGAT Discriminator Loss = log(D(real)) + log(1-D(fake_rand)) + log(1-D(fake_rec))
+    ld_rand = d_loss_fn(score_real, score_fake_rand)
+    ld_rec = d_loss_fn(score_real, score_fake_rec)
+    loss_d = ld_rand + ld_rec
+    # losses['D_loss'] = loss_d.item()
+    losses['D_rand'] = ld_rand.item()
+    losses['D_rec'] = ld_rec.item()
 
-            # Generate fake trajectory from noise encoded by Latent Encoder
-            generator.context_encoder(batch)
-            dist_real = latent_encoder(
-                traj_in=batch['fut_motion'], 
-                context_enc=batch['context_enc'],
-                agent_mask=batch['agent_mask'], 
-                agent_num=batch['agent_num']
-            )
-            z_rec = dist_real.sample()
-            pred_rec, _ = generator(batch, z=z_rec)
-            pred_rec = pred_rec.permute(1, 0, 2).detach()
-        
-        score_fake_rand = discriminator(batch['pre_motion'], pred_fake_rand, batch['agent_mask'], batch['agent_num'])
-        score_fake_rec = discriminator(batch['pre_motion'], pred_rec, batch['agent_mask'], batch['agent_num'])
-
-        # --- Compute Full D Loss ---
-        # BiGAT Discriminator Loss = log(D(real)) + log(1-D(fake_rand)) + log(1-D(fake_rec))
-        ld_rand = d_loss_fn(score_real, score_fake_rand)
-        ld_rec = d_loss_fn(score_real, score_fake_rec)
-        loss_d = ld_rand + ld_rec
-        # losses['D_loss'] = loss_d.item()
-        losses['D_rand'] = ld_rand.item()
-        losses['D_rec'] = ld_rec.item()
-
-    scaler.scale(loss_d).backward()
+    loss_d.backward()
     if args.clipping_threshold_d > 0:
-        scaler.unscale_(optimizer_d)
         nn.utils.clip_grad_norm_(discriminator.parameters(), args.clipping_threshold_d)
-    scaler.step(optimizer_d)
-    scaler.update()
+    optimizer_d.step()
 
     # ==================================================================
     # 2. Update Generator (G) and Latent Encoder (E)
     # ==================================================================
-    with torch.cuda.amp.autocast(enabled=False):
-        # pre-compute context encoding
-        generator.context_encoder(batch)
-        ctx_enc = batch['context_enc']
+    optimizer_g.zero_grad()
+    # --- Stage 1 (Stage 1: z_rand -> G -> Fake) ---
+    # Gan loss for G
+    score_fake_rand_g = discriminator(batch['pre_motion'], pred_fake_rand, batch['agent_mask'], batch['agent_num'])
+    loss_gan1 = g_loss_fn(score_fake_rand_g)
 
-        # -------------------------------------------------------------
-        # Stage 1: z_rand -> G -> Fake
-        # -------------------------------------------------------------
-        # Gan loss for G
-        pred_rand, _ = generator(batch, z=z_rand, pre_compute_context=True)  # pred_rand: [Agents, time, 2]
-        pred_rand = pred_rand.permute(1, 0, 2)
+    # L_z = |E(Y_hat)-z|
+    dist_fake = latent_encoder(
+        traj_in=pred_fake_rand,
+        context_enc=ctx_enc.detach(),
+        agent_mask=batch['agent_mask'],
+        agent_num=batch['agent_num']
+    )
+    z_rec_mu = dist_fake.mu
+    loss_z = torch.abs(z_rec_mu - z_rand).mean()
 
-        score_fake_rand = discriminator(batch['pre_motion'], pred_rand, batch['agent_mask'], batch['agent_num']) # stage 1
-        loss_gan1 = g_loss_fn(score_fake_rand)
+    # --- Stage 2 (Stage 2: z_real -> G -> Fake) ---
+    # KL loss for this distribution
+    loss_kl = dist_real.kl(p=None).sum(dim=-1).mean()
+    
+    # traj reconstruction loss (l2 loss)
+    loss_mask = batch.get('fut_mask', None)
+    if loss_mask is not None:
+        loss_mask = loss_mask.transpose(0, 1)   # [agents, Time]
+    l2 = l2_loss(pred_rec, batch['fut_motion'], loss_mask)
+    losses['G_l2'] = l2.item()
 
-        # L_z = |E(Y_hat)-z|
-        dist_fake = latent_encoder(
-            traj_in=pred_rand,
-            context_enc=ctx_enc.detach(),
-            agent_mask=batch['agent_mask'],
-            agent_num=batch['agent_num']
-        )
-        z_rec_mu = dist_fake.mu
-        loss_z = torch.abs(z_rec_mu - z_rand).mean()
-
-        # -------------------------------------------------------------
-        # Stage 2: z_real -> G -> Fake
-        # -------------------------------------------------------------
-        # A. Encode GT to Z
-        dist_real = latent_encoder(
-            traj_in=batch['fut_motion'],
-            context_enc=ctx_enc,
-            agent_mask=batch['agent_mask'],
-            agent_num=batch['agent_num']
-        )
-        z_real = dist_real.rsample()
-
-        # KL loss for this distribution
-        loss_kl = dist_real.kl(p=None).sum(dim=-1).mean()
-        
-        # traj reconstruction loss (l2 loss)
-        pred_rec, _ = generator(batch, z=z_real, pre_compute_context=True)
-        pred_rec = pred_rec.permute(1, 0, 2)
-
-        loss_mask = batch.get('fut_mask', None)
-        if loss_mask is not None:
-            # [Time, agents] -> 
-            loss_mask = loss_mask.transpose(0, 1)   # [agents, Time]
-
-        if loss_mask is not None:
-            l2 = l2_loss(pred_rec, batch['fut_motion'], loss_mask)
-        losses['G_l2'] = l2.item()
-
-        # GAN loss for G
-        score_rec = discriminator(batch['pre_motion'], pred_rec, batch['agent_mask'], batch['agent_num']) # stage 2
-        loss_gan2 = g_loss_fn(score_rec)
+    # G loss (Stage 2)
+    score_rec_g = discriminator(batch['pre_motion'], pred_rec, batch['agent_mask'], batch['agent_num']) # stage 2
+    loss_gan2 = g_loss_fn(score_rec_g)
  
-        # Total loss
-        loss = loss_gan1 + loss_z + loss_gan2 + args.kl_weight * loss_kl + args.l2_loss_weight * l2
-        losses['G_rand'] = loss_gan1.item()
-        losses['G_rec'] = loss_gan2.item()
-        losses['G_l2'] = l2.item()
-        losses['L_z'] = loss_z.item()
-        losses['L_kl'] = loss_kl.item()
-    scaler.scale(loss).backward()
+    # Total loss
+    loss = loss_gan1 + loss_z + loss_gan2 + args.kl_weight * loss_kl + args.l2_loss_weight * l2
+    losses['G_rand'] = loss_gan1.item()
+    losses['G_rec'] = loss_gan2.item()
+    losses['G_l2'] = l2.item()
+    losses['L_z'] = loss_z.item()
+    losses['L_kl'] = loss_kl.item()
+    loss.backward()
     if args.clipping_threshold_g > 0:
-        scaler.unscale_(optimizer_g)
         nn.utils.clip_grad_norm_(generator.parameters(), args.clipping_threshold_g)
-    scaler.step(optimizer_g)
-    scaler.update()
+    optimizer_g.step()
 
     return losses
 

@@ -46,7 +46,7 @@ noise_std: 0.0
 
 # --- CVAE Control ---
 kl_weight: 1.0
-l2_loss_weight: 0.5
+l2_loss_weight: 1.0
 
 # --- Output ---
 output_dir: './checkpoints/eth_bisgan3A'
