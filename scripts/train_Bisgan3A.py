@@ -125,6 +125,7 @@ parser.add_argument('--noise_std', default=0.0, type=float, help='Add Gaussian n
 # parser.add_argument('--use_cvae', default=0, type=int, help='1 to enable CVAE (KL loss), 0 for Pure GAN')
 parser.add_argument('--kl_weight', default=1.0, type=float)
 parser.add_argument('--l2_loss_weight', default=1.0, type=float)
+parser.add_argument('--lz_weight', default=1.0, type=float)
 
 # --- Output ---
 parser.add_argument('--output_dir', default=os.getcwd())
@@ -569,7 +570,13 @@ def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn,
     loss_gan2 = g_loss_fn(score_rec_g)
  
     # Total loss
-    loss = loss_gan1 + loss_z + loss_gan2 + args.kl_weight * loss_kl + args.l2_loss_weight * l2
+    loss = (
+        loss_gan1
+        + args.lz_weight * loss_z
+        + loss_gan2
+        + args.kl_weight * loss_kl
+        + args.l2_loss_weight * l2
+    )
     losses['G_rand'] = loss_gan1.item()
     losses['G_rec'] = loss_gan2.item()
     losses['G_l2'] = l2.item()
