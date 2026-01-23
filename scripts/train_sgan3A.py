@@ -485,7 +485,7 @@ def main(args):
                 logger.warning(f'Failed to plot training curves: {e}')
 
 
-def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimizer_d, scaler, device):
+def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimizer_d, scaler, device, current_noise_std):
     losses = {}
     optimizer_d.zero_grad()
 
@@ -502,8 +502,8 @@ def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimiz
         pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
         
         # Discriminator Forward
-        scores_fake = discriminator(batch['pre_motion'], pred_fake_abs, batch['agent_mask'], batch['agent_num'], args.noise_std)
-        scores_real = discriminator(batch['pre_motion'], pred_real_abs, batch['agent_mask'], batch['agent_num'], args.noise_std)
+        scores_fake = discriminator(batch['pre_motion'], pred_fake_abs, batch['agent_mask'], batch['agent_num'], current_noise_std)
+        scores_real = discriminator(batch['pre_motion'], pred_real_abs, batch['agent_mask'], batch['agent_num'], current_noise_std)
 
         # Compute Loss
         loss = d_loss_fn(scores_real, scores_fake)
