@@ -342,6 +342,7 @@ def main(args):
             args.kl_weight = org_kl_weight * 0.1
         else:
             args.kl_weight = org_kl_weight
+        logger.info(f"Current KL weight: {args.kl_weight}")
         
         while batcher.has_data():
             raw_batch = batcher.next_batch()
@@ -554,7 +555,7 @@ def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn,
     # L_z = |E(Y_hat)-z|
     dist_fake = latent_encoder(
         traj_in=pred_fake_rand,
-        context_enc=ctx_enc.detach(),
+        context_enc=ctx_enc,
         agent_mask=batch['agent_mask'],
         agent_num=batch['agent_num']
     )
