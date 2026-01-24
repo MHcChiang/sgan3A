@@ -336,6 +336,13 @@ def main(args):
         current_noise_std = initial_noise_std * max(0.0, 1.0 - (epoch / noise_decay_epochs))
         logger.info(f"Current noise std: {current_noise_std}")
 
+        # Test: KL Annealing
+        org_kl_weight = args.kl_weight
+        if epoch <= 10:
+            args.kl_weight = org_kl_weight * 0.1
+        else:
+            args.kl_weight = org_kl_weight
+        
         while batcher.has_data():
             raw_batch = batcher.next_batch()
             if raw_batch is None: continue
