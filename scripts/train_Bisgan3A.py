@@ -320,7 +320,8 @@ def main(args):
 
     batcher = SmartBatcher(train_gen, args.batch_size, augment=args.augment, max_agents_limit=50, conn_dist=args.conn_dist)
     logger.info(f"Used SmartBatcher to fetch batch, batch size: {args.batch_size}, agent limit: {batcher.effective_limit*2}, conn_dist: {args.conn_dist}")
-    
+    org_kl_weight = args.kl_weight
+
     # Main training loop
     while epoch < args.num_epochs:
         epoch += 1
@@ -336,8 +337,7 @@ def main(args):
         current_noise_std = initial_noise_std * max(0.0, 1.0 - (epoch / noise_decay_epochs))
         logger.info(f"Current noise std: {current_noise_std}")
 
-        # Test: KL Annealing
-        org_kl_weight = args.kl_weight
+        # Test: KL Annealing   
         if epoch <= 10:
             args.kl_weight = org_kl_weight * 0.1
         else:

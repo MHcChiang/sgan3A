@@ -14,7 +14,7 @@ conn_dist: 100000.0
 
 # --- Optimization ---
 batch_size: 16
-num_epochs: 30
+num_epochs: 20
 best_k: 10
 g_learning_rate: 0.0001
 d_learning_rate: 0.0001
