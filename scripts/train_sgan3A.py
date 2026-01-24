@@ -496,7 +496,7 @@ def discriminator_step(args, batch, generator, discriminator, d_loss_fn, optimiz
         # Generate Fake (Detach to stop gradients to Generator)
         with torch.no_grad():
             pred_fake_abs, _ = generator(batch) 
-            pred_fake_abs = pred_fake_abs.permute(1, 0, 2).detach()
+            pred_fake_abs = pred_fake_abs.permute(1, 0, 2).contiguous().detach()
 
         # Get Real Data
         pred_real_abs = batch['fut_motion'] # [Time, Agents, 2]
@@ -543,7 +543,7 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
         
         # Ground Truth & Pre-processing
         # 1. Convert GT to [Batch, Time, 2] for unified calculation
-        pred_real_norm = batch['fut_motion'].permute(1, 0, 2) 
+        pred_real_norm = batch['fut_motion'].permute(1, 0, 2).contiguous() 
         
         # 2. Prepare current position for restoration (Residual Connection)
         # [Batch, 2] -> [Batch, 1, 2] (convenient for broadcasting addition to Time dimension)
@@ -566,7 +566,7 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
         else:
             # Variety Loss Logic (Best-of-K)
             stack_preds, data_dicts_k = generator(batch, k=k)  # Output: [agents, K, time, 2]
-            stack_preds = stack_preds.permute(1, 0, 2, 3) # [K, Agents, Time, 2]
+            stack_preds = stack_preds.permute(1, 0, 2, 3).contiguous() # [K, Agents, Time, 2]
 
             best_pred_fake, best_l2_sum = select_best_k_scene(
                 stack_preds, 
@@ -600,7 +600,7 @@ def generator_step(args, batch, generator, discriminator, g_loss_fn, optimizer_g
             
             # 0109 Modify: Pick random k instead of feeding best traj to D
             random_idx = torch.randint(0, k, (1,)).item()
-            pred_fake = stack_preds[random_idx].permute(1, 0, 2)
+            pred_fake = stack_preds[random_idx].permute(1, 0, 2).contiguous()
             scores_fake = discriminator(batch['pre_motion'], pred_fake, batch['agent_mask'], batch['agent_num'])
             
             loss_adv = g_loss_fn(scores_fake)

@@ -14,7 +14,7 @@ conn_dist: 100000.0
 
 # --- Optimization ---
 batch_size: 16
-num_epochs: 20
+num_epochs: 40
 best_k: 10
 g_learning_rate: 0.0001
 d_learning_rate: 0.0001
@@ -47,7 +47,7 @@ noise_std: 0.0
 # --- CVAE Control ---
 kl_weight: 1.0
 l2_loss_weight: 1.0
-lz_weight: 3.0
+lz_weight: 5.0
 
 # --- Output ---
 output_dir: './checkpoints/eth_bisgan3A'

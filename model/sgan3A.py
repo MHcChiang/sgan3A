@@ -248,7 +248,7 @@ class BiGATLatentEncoder(FutureEncoder):
         """
         # 1. 構建 Input Projection
         # Use reshape to handle non-contiguous tensors (e.g., after permute)
-        tf_in = self.input_fc(traj_in.reshape(-1, traj_in.shape[-1])).view(-1, 1, self.model_dim)
+        tf_in = self.input_fc(traj_in.view(-1, traj_in.shape[-1])).view(-1, 1, self.model_dim)
         
         # 2. Positional Encoding
         tf_in_pos = self.pos_encoder(tf_in, num_a=agent_num)

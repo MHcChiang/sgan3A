@@ -502,7 +502,7 @@ def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn,
     generator.context_encoder(batch)
     ctx_enc = batch['context_enc']
     pred_fake_rand, _ = generator(batch, z=z_rand, pre_compute_context=True) # pred_fake_rand: [Agents, time, 2]
-    pred_fake_rand = pred_fake_rand.permute(1, 0, 2) # [Time, Agents, 2]
+    pred_fake_rand = pred_fake_rand.permute(1, 0, 2).contiguous() # [Time, Agents, 2]
     
     # From noise encoded by Latent Encoder
     generator.context_encoder(batch)
@@ -514,7 +514,7 @@ def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn,
     )
     z_rec = dist_real.rsample()  # rsample to pass gradient
     pred_rec, _ = generator(batch, z=z_rec, pre_compute_context=True)  # pred_rec: [Agents, time, 2]
-    pred_rec = pred_rec.permute(1, 0, 2)
+    pred_rec = pred_rec.permute(1, 0, 2).contiguous() # [Time, Agents, 2]
         
     # ==================================================================
     # 1. Update Discriminator (D)
