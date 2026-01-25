@@ -349,7 +349,7 @@ def main(args):
             args.kl_weight = org_kl_weight
             args.l2_loss_weight = org_l2_loss_weight
             args.lz_weight = org_lz_weight
-        logger.info(f"Current KL weight: {args.kl_weight}")
+        logger.info(f"Current KL weight: {args.kl_weight}| l2 weight: {args.l2_loss_weight}| lz weight: {args.lz_weight}")
 
         # warmup phase
         is_warmup = epoch <= args.warmup_epochs
@@ -547,17 +547,14 @@ def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn,
         ld_rand = d_loss_fn(score_real, score_fake_rand)
         ld_rec = d_loss_fn(score_real, score_fake_rec)
         loss_d = ld_rand + ld_rec
-        # losses['D_loss'] = loss_d.item()
-        losses['D_rand'] = ld_rand.item()
-        losses['D_rec'] = ld_rec.item()
 
         loss_d.backward()
         if args.clipping_threshold_d > 0:
             nn.utils.clip_grad_norm_(discriminator.parameters(), args.clipping_threshold_d)
         optimizer_d.step()
     else:
-        losses['D_rand'] = 0.0
-        losses['D_rec'] = 0.0
+        ld_rand = torch.tensor(0.0).to(device)
+        ld_rec = torch.tensor(0.0).to(device)
 
     # ==================================================================
     # 2. Update Generator (G) and Latent Encoder (E)
@@ -607,10 +604,14 @@ def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn,
         + args.kl_weight * loss_kl
         + args.l2_loss_weight * l2
     )
+
+    # Add to log
     losses['G_rand'] = loss_gan1.item()
-    losses['G_rec'] = loss_gan2.item()
-    losses['G_l2'] = l2.item()
+    losses['D_rand'] = ld_rand.item()
     losses['L_z'] = loss_z.item()
+    losses['G_rec'] = loss_gan2.item()
+    losses['D_rec'] = ld_rec.item()
+    losses['G_l2'] = l2.item()
     losses['L_kl'] = loss_kl.item()
     loss.backward()
     if args.clipping_threshold_g > 0:
