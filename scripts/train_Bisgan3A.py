@@ -89,6 +89,7 @@ parser.add_argument('--d_learning_rate', default=1e-4, type=float)
 # parser.add_argument('--d_steps', default=2, type=int)
 parser.add_argument('--clipping_threshold_g', default=0, type=float)
 parser.add_argument('--clipping_threshold_d', default=0, type=float)
+parser.add_argument('--warmup_epochs', default=0, type=int, help='Number of epochs to train G only on L2 and Lz loss')
 # parser.add_argument('--k', default=1, type=int, help='Number of samples for Variety Loss')
 
 # --- Learning Rate Scheduler ---
@@ -321,6 +322,8 @@ def main(args):
     batcher = SmartBatcher(train_gen, args.batch_size, augment=args.augment, max_agents_limit=50, conn_dist=args.conn_dist)
     logger.info(f"Used SmartBatcher to fetch batch, batch size: {args.batch_size}, agent limit: {batcher.effective_limit*2}, conn_dist: {args.conn_dist}")
     org_kl_weight = args.kl_weight
+    org_l2_loss_weight = args.l2_loss_weight
+    org_lz_weight = args.lz_weight
 
     # Main training loop
     while epoch < args.num_epochs:
@@ -337,12 +340,21 @@ def main(args):
         current_noise_std = initial_noise_std * max(0.0, 1.0 - (epoch / noise_decay_epochs))
         logger.info(f"Current noise std: {current_noise_std}")
 
-        # Test: KL Annealing   
+        # Test: KL Annealing + l2 boomup
         if epoch <= 10:
             args.kl_weight = org_kl_weight * 0.1
+            args.l2_loss_weight = org_l2_loss_weight * 10.0
+            args.lz_weight = org_lz_weight * 3.0
         else:
             args.kl_weight = org_kl_weight
+            args.l2_loss_weight = org_l2_loss_weight
+            args.lz_weight = org_lz_weight
         logger.info(f"Current KL weight: {args.kl_weight}")
+
+        # warmup phase
+        is_warmup = epoch <= args.warmup_epochs
+        if is_warmup:
+            logger.info(f"WARMUP PHASE: Training Generator Only (Epoch {epoch}/{args.warmup_epochs})")
         
         while batcher.has_data():
             raw_batch = batcher.next_batch()
@@ -355,7 +367,7 @@ def main(args):
             step_losses = biGAN_step(
                 args, batch, generator, discriminator, latent_encoder, 
                 d_hinge_loss, g_hinge_loss, # gan_d_loss, gan_g_loss,         #
-                optimizer_g, optimizer_d, device)
+                optimizer_g, optimizer_d, device, is_warmup)
 
             t += 1
             batch_count += 1
@@ -490,7 +502,7 @@ def main(args):
                 logger.warning(f'Failed to plot training curves: {e}')
 
 
-def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn, g_loss_fn, optimizer_g, optimizer_d, device):
+def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn, g_loss_fn, optimizer_g, optimizer_d, device, is_warmup):
     losses = {}
     # ==================================================================
     # 0. Make Fake Trajectories
@@ -519,38 +531,45 @@ def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn,
     # ==================================================================
     # 1. Update Discriminator (D)
     # ==================================================================
-    optimizer_d.zero_grad()
-    # --- Stage 1 (Stage 1: z_rand -> G -> Fake) ---
-    # Real trajectory score
-    pred_real = batch['fut_motion']
-    score_real = discriminator(batch['pre_motion'], pred_real, batch['agent_mask'], batch['agent_num'])
-    score_fake_rand = discriminator(batch['pre_motion'], pred_fake_rand.detach(), batch['agent_mask'], batch['agent_num'])
-    
-    # Stage 2 (Stage 2: z_rec -> G -> Fake)
-    score_fake_rec = discriminator(batch['pre_motion'], pred_rec.detach(), batch['agent_mask'], batch['agent_num'])
+    if not is_warmup:
+        optimizer_d.zero_grad()
+        # --- Stage 1 (Stage 1: z_rand -> G -> Fake) ---
+        # Real trajectory score
+        pred_real = batch['fut_motion']
+        score_real = discriminator(batch['pre_motion'], pred_real, batch['agent_mask'], batch['agent_num'])
+        score_fake_rand = discriminator(batch['pre_motion'], pred_fake_rand.detach(), batch['agent_mask'], batch['agent_num'])
+        
+        # Stage 2 (Stage 2: z_rec -> G -> Fake)
+        score_fake_rec = discriminator(batch['pre_motion'], pred_rec.detach(), batch['agent_mask'], batch['agent_num'])
 
-    # --- Compute Full D Loss ---
-    # BiGAT Discriminator Loss = log(D(real)) + log(1-D(fake_rand)) + log(1-D(fake_rec))
-    ld_rand = d_loss_fn(score_real, score_fake_rand)
-    ld_rec = d_loss_fn(score_real, score_fake_rec)
-    loss_d = ld_rand + ld_rec
-    # losses['D_loss'] = loss_d.item()
-    losses['D_rand'] = ld_rand.item()
-    losses['D_rec'] = ld_rec.item()
+        # --- Compute Full D Loss ---
+        # BiGAT Discriminator Loss = log(D(real)) + log(1-D(fake_rand)) + log(1-D(fake_rec))
+        ld_rand = d_loss_fn(score_real, score_fake_rand)
+        ld_rec = d_loss_fn(score_real, score_fake_rec)
+        loss_d = ld_rand + ld_rec
+        # losses['D_loss'] = loss_d.item()
+        losses['D_rand'] = ld_rand.item()
+        losses['D_rec'] = ld_rec.item()
 
-    loss_d.backward()
-    if args.clipping_threshold_d > 0:
-        nn.utils.clip_grad_norm_(discriminator.parameters(), args.clipping_threshold_d)
-    optimizer_d.step()
+        loss_d.backward()
+        if args.clipping_threshold_d > 0:
+            nn.utils.clip_grad_norm_(discriminator.parameters(), args.clipping_threshold_d)
+        optimizer_d.step()
+    else:
+        losses['D_rand'] = 0.0
+        losses['D_rec'] = 0.0
 
     # ==================================================================
     # 2. Update Generator (G) and Latent Encoder (E)
     # ==================================================================
     optimizer_g.zero_grad()
-    # --- Stage 1 (Stage 1: z_rand -> G -> Fake) ---
-    # Gan loss for G
-    score_fake_rand_g = discriminator(batch['pre_motion'], pred_fake_rand, batch['agent_mask'], batch['agent_num'])
-    loss_gan1 = g_loss_fn(score_fake_rand_g)
+    if not is_warmup:
+        # --- Stage 1 (Stage 1: z_rand -> G -> Fake) ---
+        # Gan loss for G
+        score_fake_rand_g = discriminator(batch['pre_motion'], pred_fake_rand, batch['agent_mask'], batch['agent_num'])
+        loss_gan1 = g_loss_fn(score_fake_rand_g)
+    else:
+        loss_gan1 = torch.tensor(0.0).to(device)
 
     # L_z = |E(Y_hat)-z|
     dist_fake = latent_encoder(
@@ -563,19 +582,22 @@ def biGAN_step(args , batch, generator, discriminator,latent_encoder, d_loss_fn,
     loss_z = torch.abs(z_rec_mu - z_rand).mean()
 
     # --- Stage 2 (Stage 2: z_real -> G -> Fake) ---
-    # KL loss for this distribution
-    loss_kl = dist_real.kl(p=None).sum(dim=-1).mean()
-    
     # traj reconstruction loss (l2 loss)
     loss_mask = batch.get('fut_mask', None)
     if loss_mask is not None:
         loss_mask = loss_mask.transpose(0, 1)   # [agents, Time]
     l2 = l2_loss(pred_rec, batch['fut_motion'], loss_mask)
     losses['G_l2'] = l2.item()
-
-    # G loss (Stage 2)
-    score_rec_g = discriminator(batch['pre_motion'], pred_rec, batch['agent_mask'], batch['agent_num']) # stage 2
-    loss_gan2 = g_loss_fn(score_rec_g)
+    if not is_warmup:
+        # KL loss for this distribution
+        loss_kl = dist_real.kl(p=None).sum(dim=-1).mean()
+        
+        # G loss (Stage 2)
+        score_rec_g = discriminator(batch['pre_motion'], pred_rec, batch['agent_mask'], batch['agent_num']) # stage 2
+        loss_gan2 = g_loss_fn(score_rec_g)
+    else:
+        loss_kl = torch.tensor(0.0).to(device)
+        loss_gan2 = torch.tensor(0.0).to(device)
  
     # Total loss
     loss = (
